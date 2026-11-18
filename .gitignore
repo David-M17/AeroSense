@@ -1,0 +1,9 @@
+# PlatformIO
+.pio/
+.vscode/
+*.pyc
+
+# Credenciales (nunca subir)
+secrets.h
+**/include/secrets.h
+.env
