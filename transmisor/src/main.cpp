@@ -36,6 +36,34 @@ Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 // Contador de paquetes de telemetría
 unsigned int packetId = 0;
 
+// --- Lectura del PMS7003M ---
+// La librería PMS procesa UN solo byte por llamada a read() y una trama completa mide
+// 32 bytes, así que hay que vaciar el buffer UART en cada pasada del loop().
+// Se conserva la última lectura válida; si no llegan tramas, se envía null (no 0).
+int pm1 = 0, pm25 = 0, pm10 = 0;
+bool pmValido = false;
+unsigned long ultimaTramaPms = 0;
+const unsigned long PMS_CADUCIDAD_MS = 10000; // lectura "vieja" tras 10 s sin tramas
+
+// Control de tiempos de transmisión (sin delay() para no perder tramas del PMS)
+unsigned long ultimoEnvio = 0;
+const unsigned long INTERVALO_ENVIO_MS = 2000;
+
+void leerPms()
+{
+  while (pmsSerial.available() > 0)
+  {
+    if (pms.read(pmsData))
+    {
+      pm1 = pmsData.PM_AE_UG_1_0;
+      pm25 = pmsData.PM_AE_UG_2_5;
+      pm10 = pmsData.PM_AE_UG_10_0;
+      ultimaTramaPms = millis();
+      pmValido = true;
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -71,41 +99,41 @@ void setup() {
   Serial.println("🚀 Sistema listo. Comenzando transmisión por LoRa...\n");
 }
 
-void loop() {
-  // 1. Esperar a que el canal del módulo LoRa esté libre (AUX en HIGH)
-  while (digitalRead(LORA_AUX) == LOW) {
-    delay(1);
-  }
+void loop()
+{
+  // 1. Vaciar siempre el buffer del PMS7003M (no bloquear el loop)
+  leerPms();
 
-  // 2. Lectura de variables meteorológicas
+  // 2. Transmitir cada INTERVALO_ENVIO_MS y solo si el módulo LoRa está libre (AUX en HIGH)
+  if (millis() - ultimoEnvio < INTERVALO_ENVIO_MS || digitalRead(LORA_AUX) == LOW)
+  {
+    return;
+  }
+  ultimoEnvio = millis();
+
+  // 3. Lectura de variables meteorológicas
   float temp = dht.readTemperature();
   float hum = dht.readHumidity();
-  
+
   // Lecturas barométricas
-  float pres = bmp.readPressure() / 100.0;     // Convertir Pa a hPa (millibares)
-  float alt = bmp.readAltitude(101325);        // Altitud estimada con referencia Estándar (1013.25 hPa)
+  float pres = bmp.readPressure() / 100.0; // Convertir Pa a hPa (millibares)
+  float alt = bmp.readAltitude(101325);    // Altitud estimada con referencia Estándar (1013.25 hPa)
 
   // Manejo del error de lectura del DHT22
-  if (isnan(temp) || isnan(hum)) {
+  if (isnan(temp) || isnan(hum))
+  {
     temp = 0.0;
     hum = 0.0;
   }
 
-  // 3. Lectura de Inercia y Aceleración en 3 Ejes
+  // 4. Lectura de Inercia y Aceleración en 3 Ejes
   sensors_event_t event;
   accel.getEvent(&event);
 
-  // 4. Lectura de Calidad del Aire (PMS7003M)
-  int pm1 = 0, pm25 = 0, pm10 = 0;
-  
-  // Intenta leer la trama activa más reciente emitida por el PMS7003M
-  if (pms.read(pmsData)) {
-    pm1 = pmsData.PM_AE_UG_1_0;
-    pm25 = pmsData.PM_AE_UG_2_5;
-    pm10 = pmsData.PM_AE_UG_10_0;
-  }
+  // 5. Calidad del aire: válida solo si llegó una trama reciente del PMS7003M
+  bool pmFresco = pmValido && (millis() - ultimaTramaPms < PMS_CADUCIDAD_MS);
 
-  // 5. Construcción del JSON de Telemetría
+  // 6. Construcción del JSON de Telemetría
   JsonDocument doc;
   doc["id"] = packetId++;
   doc["alt"] = round(alt * 10.0) / 10.0;
@@ -113,11 +141,20 @@ void loop() {
   doc["temp"] = round(temp * 10.0) / 10.0;
   doc["hum"] = (int)hum;
 
-  // Sub-objeto para Material Particulado (Calidad del aire)
+  // Sub-objeto para Material Particulado (null si el sensor no tiene lectura reciente)
   JsonObject pm = doc["pm"].to<JsonObject>();
-  pm["pm1"] = pm1;
-  pm["pm25"] = pm25;
-  pm["pm10"] = pm10;
+  if (pmFresco)
+  {
+    pm["pm1"] = pm1;
+    pm["pm25"] = pm25;
+    pm["pm10"] = pm10;
+  }
+  else
+  {
+    pm["pm1"] = nullptr;
+    pm["pm25"] = nullptr;
+    pm["pm10"] = nullptr;
+  }
 
   // Sub-objeto para Aceleración
   JsonObject acc = doc["acc"].to<JsonObject>();
@@ -125,7 +162,7 @@ void loop() {
   acc["y"] = round(event.acceleration.y * 100.0) / 100.0;
   acc["z"] = round(event.acceleration.z * 100.0) / 100.0;
 
-  // 6. Transmisión Serial por LoRa E220
+  // 7. Transmisión Serial por LoRa E220
   serializeJson(doc, loraSerial);
   loraSerial.println(); // Delimitador de paquete por salto de línea '\n'
 
@@ -133,7 +170,4 @@ void loop() {
   Serial.print("Enviado [LoRa JSON]: ");
   serializeJson(doc, Serial);
   Serial.println();
-
-  // Pausa entre lecturas y emisiones
-  delay(2000);
 }

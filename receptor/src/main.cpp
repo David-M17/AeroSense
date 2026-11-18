@@ -1,12 +1,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <WebServer.h>
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
 
-// Credenciales (WiFi y Telegram) definidas en include/secrets.h (ignorado por Git)
-#include "secrets.h"
+#include "secrets.h" // ssid, password, BOT_TOKEN, CHAT_ID (ignorado por Git)
+#include "telemetria.h"
+#include "web_server.h"
 
 WiFiClientSecure client;
 UniversalTelegramBot bot(BOT_TOKEN, client);
@@ -17,18 +17,12 @@ UniversalTelegramBot bot(BOT_TOKEN, client);
 #define LORA_AUX 15
 
 HardwareSerial loraSerial(2);
-WebServer server(80);
 
-// Variables globales para la telemetría recibida
-String lastJsonRaw = "{}";
-unsigned int lastId = 0;
-float lastAlt = 0.0;
-float lastPres = 0.0;
-float lastTemp = 0.0;
-int lastHum = 0;
-int lastPm1 = 0, lastPm25 = 0, lastPm10 = 0;
-float accX = 0.0, accY = 0.0, accZ = 0.0;
-unsigned long ultimaRecepcion = 0; // millis() del último paquete LoRa recibido
+// Última telemetría recibida (compartida con web_server.cpp)
+Telemetria tel;
+
+// Línea que se va armando con los bytes que llegan del E220
+String lineaLora = "";
 
 // Control de tiempos para Telegram
 unsigned long ultimoSondeo = 0;
@@ -41,8 +35,8 @@ const unsigned long SIN_SENAL_MS = 60000;               // 1 minuto sin paquetes
 const float PM25_ALTO = 45.0;
 
 // Declaración de funciones
-void handleRoot();
-void handleData();
+void leerLora();
+void procesarPaquete(const String &linea);
 void enviarDatosTelegram(const String &chat_id);
 void alertaTelegram(int i, const String &texto);
 void revisarAlertas();
@@ -58,7 +52,7 @@ void setup()
   Serial.println("==============================================");
 
   // Configurar búfer UART amplio para evitar pérdida de paquetes LoRa durante peticiones web/Telegram
-  loraSerial.setRxBufferSize(256);
+  loraSerial.setRxBufferSize(512);
   loraSerial.begin(9600, SERIAL_8N1, LORA_RX, LORA_TX);
   pinMode(LORA_AUX, INPUT);
 
@@ -82,54 +76,17 @@ void setup()
   // Mensaje inicial a Telegram indicando que la estación encendió
   bot.sendMessage(CHAT_ID, "🛰️ AeroSense Terrestre en línea y escuchando al globo", "");
 
-  // Rutas del Servidor Web
-  server.on("/", handleRoot);
-  server.on("/data", handleData);
-  server.begin();
+  // Panel web (ver web_server.cpp y web_page.h)
+  webIniciar();
 }
 
 void loop()
 {
   // 1. Manejar peticiones HTTP del navegador (Dashboard con gráficas)
-  server.handleClient();
+  webAtender();
 
-  // 2. Verificar si hay datos nuevos viniendo del LoRa E220
-  if (loraSerial.available() > 0)
-  {
-    String incomingMessage = loraSerial.readStringUntil('\n');
-    incomingMessage.trim();
-
-    if (incomingMessage.startsWith("{") && incomingMessage.endsWith("}"))
-    {
-      JsonDocument doc;
-      DeserializationError error = deserializeJson(doc, incomingMessage);
-
-      if (!error)
-      {
-        lastJsonRaw = incomingMessage;
-        lastId = doc["id"];
-        lastAlt = doc["alt"];
-        lastPres = doc["pres"];
-        lastTemp = doc["temp"];
-        lastHum = doc["hum"];
-
-        JsonObject pm = doc["pm"];
-        lastPm1 = pm["pm1"];
-        lastPm25 = pm["pm25"];
-        lastPm10 = pm["pm10"];
-
-        JsonObject acc = doc["acc"];
-        accX = acc["x"];
-        accY = acc["y"];
-        accZ = acc["z"];
-
-        ultimaRecepcion = millis(); // Actualizar marca de tiempo de última señal
-
-        Serial.println("-> Paquete LoRa procesado correctamente:");
-        Serial.println(incomingMessage);
-      }
-    }
-  }
+  // 2. Leer lo que llegue del LoRa E220 (paquetes JSON + byte RSSI)
+  leerLora();
 
   // 3. Revisar comandos y enviar alertas de Telegram de forma periódica
   if (millis() - ultimoSondeo > INTERVALO_SONDEO)
@@ -145,19 +102,111 @@ void loop()
   }
 }
 
+// --- RECEPCIÓN LORA ---
+
+// Si el E220 receptor tiene habilitada la opción "RSSI byte", añade 1 byte al final de cada
+// paquete recibido: dBm = -(256 - byte). El JSON es ASCII puro (< 0x80), y todo RSSI válido
+// es >= 0x80 (<= -1 dBm), así que cualquier byte >= 0x80 se interpreta como RSSI y no se
+// mezcla con el texto. Sin esa opción activa, simplemente nunca llega ese byte.
+void leerLora()
+{
+  while (loraSerial.available() > 0)
+  {
+    uint8_t b = loraSerial.read();
+
+    if (b >= 0x80)
+    {
+      tel.rssiDbm = -(256 - (int)b);
+      tel.rssiTs = millis();
+      Serial.printf("   RSSI: %d dBm (%s)\n", tel.rssiDbm, calidadRssi(tel.rssiDbm));
+      continue;
+    }
+
+    if (b == '\r')
+      continue;
+
+    if (b == '\n')
+    {
+      lineaLora.trim();
+      procesarPaquete(lineaLora);
+      lineaLora = "";
+      continue;
+    }
+
+    if (lineaLora.length() < 512)
+      lineaLora += (char)b;
+    else
+      lineaLora = ""; // línea demasiado larga: ruido, se descarta
+  }
+}
+
+void procesarPaquete(const String &linea)
+{
+  if (!linea.startsWith("{") || !linea.endsWith("}"))
+    return;
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, linea);
+  if (error)
+    return;
+
+  tel.id = doc["id"];
+  tel.alt = doc["alt"];
+  tel.pres = doc["pres"];
+  tel.temp = doc["temp"];
+  tel.hum = doc["hum"];
+
+  // El transmisor manda null en pm cuando el PMS7003M no tiene lectura reciente
+  JsonObject pm = doc["pm"];
+  tel.pmValido = !pm["pm1"].isNull() && !pm["pm25"].isNull() && !pm["pm10"].isNull();
+  if (tel.pmValido)
+  {
+    tel.pm1 = pm["pm1"];
+    tel.pm25 = pm["pm25"];
+    tel.pm10 = pm["pm10"];
+  }
+
+  JsonObject acc = doc["acc"];
+  tel.accX = acc["x"];
+  tel.accY = acc["y"];
+  tel.accZ = acc["z"];
+
+  tel.ultimaRecepcion = millis(); // Actualizar marca de tiempo de última señal
+
+  Serial.println("-> Paquete LoRa procesado correctamente:");
+  Serial.println(linea);
+}
+
 // --- FUNCIONES DE TELEGRAM ---
 
 void enviarDatosTelegram(const String &chat_id)
 {
+  if (tel.ultimaRecepcion == 0)
+  {
+    bot.sendMessage(chat_id, "📡 Aún no se recibe ningún paquete del globo.", "");
+    return;
+  }
+
   String m = "📊 *Datos más recientes (Globo amarrado)*\n";
-  m += "📦 ID Paquete: " + String(lastId) + "\n";
-  m += "🏔️ Altitud: " + String(lastAlt, 1) + " m\n";
-  m += "🌡️ Temperatura: " + String(lastTemp, 1) + " °C\n";
-  m += "💧 Humedad: " + String(lastHum) + " %\n";
-  m += "🌫️ PM1.0: " + String(lastPm1) + " µg/m3\n";
-  m += "🌫️ PM2.5: " + String(lastPm25) + " µg/m3\n";
-  m += "🌫️ PM10: " + String(lastPm10) + " µg/m3\n";
-  m += "🔵 Presión: " + String(lastPres, 1) + " hPa";
+  m += "📦 ID Paquete: " + String(tel.id) + "\n";
+  m += "🏔️ Altitud: " + String(tel.alt, 1) + " m\n";
+  m += "🌡️ Temperatura: " + String(tel.temp, 1) + " °C\n";
+  m += "💧 Humedad: " + String(tel.hum) + " %\n";
+  if (tel.pmValido)
+  {
+    m += "🌫️ PM1.0: " + String(tel.pm1) + " µg/m3\n";
+    m += "🌫️ PM2.5: " + String(tel.pm25) + " µg/m3\n";
+    m += "🌫️ PM10: " + String(tel.pm10) + " µg/m3\n";
+  }
+  else
+  {
+    m += "🌫️ PM: sin lectura del sensor\n";
+  }
+  m += "🔵 Presión: " + String(tel.pres, 1) + " hPa\n";
+  if (tel.rssiVigente())
+    m += "📶 RSSI: " + String(tel.rssiDbm) + " dBm (" + calidadRssi(tel.rssiDbm) + ")";
+  else
+    m += "📶 RSSI: no disponible";
   bot.sendMessage(chat_id, m, "Markdown");
 }
 
@@ -173,14 +222,14 @@ void alertaTelegram(int i, const String &texto)
 void revisarAlertas()
 {
   // Alerta si lleva más de 1 minuto sin recibir paquetes del globo
-  if (ultimaRecepcion > 0 && (millis() - ultimaRecepcion > SIN_SENAL_MS))
+  if (tel.ultimaRecepcion > 0 && (millis() - tel.ultimaRecepcion > SIN_SENAL_MS))
   {
     alertaTelegram(0, "¡Sin señal LoRa del globo desde hace más de 1 minuto!");
   }
-  // Alerta si los niveles de PM2.5 rebasan el umbral
-  if (lastPm25 > PM25_ALTO)
+  // Alerta si los niveles de PM2.5 rebasan el umbral (solo con lectura válida)
+  if (tel.pmValido && tel.pm25 > PM25_ALTO)
   {
-    alertaTelegram(1, "Nivel alto de partículas PM2.5 detectado: " + String(lastPm25) + " µg/m3");
+    alertaTelegram(1, "Nivel alto de partículas PM2.5 detectado: " + String(tel.pm25) + " µg/m3");
   }
 }
 
@@ -205,103 +254,18 @@ void atenderMensajes(int n)
     }
     else if (texto == "/estado")
     {
-      unsigned long s = (millis() - ultimaRecepcion) / 1000;
-      bot.sendMessage(chat_id, "📡 Último paquete recibido hace " + String(s) + " segundos.", "");
+      if (tel.ultimaRecepcion == 0)
+      {
+        bot.sendMessage(chat_id, "📡 Aún no se recibe ningún paquete LoRa.", "");
+      }
+      else
+      {
+        unsigned long s = (millis() - tel.ultimaRecepcion) / 1000;
+        String m = "📡 Último paquete recibido hace " + String(s) + " segundos.";
+        if (tel.rssiVigente())
+          m += "\n📶 RSSI: " + String(tel.rssiDbm) + " dBm (" + calidadRssi(tel.rssiDbm) + ")";
+        bot.sendMessage(chat_id, m, "");
+      }
     }
   }
-}
-
-// --- SERVIDOR WEB Y GRÁFICAS (CHART.JS) ---
-
-void handleRoot()
-{
-  String html = "<html lang='es'><head><meta charset='UTF-8'>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<title>Estación Terrestre - Globo Amarrado</title>";
-  html += "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>";
-  html += "<style>";
-  html += "body { font-family: Arial, sans-serif; background: #121212; color: #e0e0e0; text-align: center; margin: 0; padding: 15px; }";
-  html += ".card { background: #1e1e1e; max-width: 600px; margin: 15px auto; padding: 15px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }";
-  html += "h1 { color: #4CAF50; font-size: 22px; }";
-  html += "h3 { color: #e0e0e0; font-size: 16px; margin-bottom: 5px; }";
-  html += ".data { font-size: 15px; margin: 6px 0; }";
-  html += ".highlight { color: #2196F3; font-weight: bold; }";
-  html += "canvas { background: #121212; border-radius: 8px; margin-top: 10px; max-height: 160px; }";
-  html += "</style></head><body>";
-
-  html += "<h1>🛰️ Estación Terrestre - Globo Amarrado (100m)</h1>";
-  html += "<div class='card'>";
-  html += "<p class='data'>Paquete ID: <span id='pid' class='highlight'>0</span></p>";
-  html += "<p class='data'>🏔️ Altitud: <span id='palt' class='highlight'>0</span> m</p>";
-  html += "<p class='data'>🌡️ Temperatura: <span id='ptemp' class='highlight'>0</span> °C | 💧 Humedad: <span id='phum' class='highlight'>0</span> %</p>";
-  html += "<p class='data'>🌫️ PM1.0: <span id='ppm1' class='highlight'>0</span> | PM2.5: <span id='ppm25' class='highlight'>0</span> | PM10: <span id='ppm10' class='highlight'>0</span> ug/m3</p>";
-  html += "<p class='data'>🔵 Presión: <span id='ppres' class='highlight'>0</span> hPa</p>";
-  html += "</div>";
-
-  // Contenedores de Gráficas
-  html += "<div class='card'><h3>📈 Altitud (m)</h3><canvas id='altChart'></canvas></div>";
-  html += "<div class='card'><h3>📈 Temperatura (°C) y Humedad (%)</h3><canvas id='envChart'></canvas></div>";
-  html += "<div class='card'><h3>📈 Calidad del Aire - Material Particulado (ug/m3)</h3><canvas id='pmChart'></canvas></div>";
-
-  html += "<script>";
-  html += "const optComun = { responsive: true, scales: { x: { ticks: { color: '#888' } }, y: { ticks: { color: '#e0e0e0' } } } };";
-
-  // Gráfica Altitud
-  html += "const altChart = new Chart(document.getElementById('altChart').getContext('2d'), {";
-  html += "  type: 'line', data: { labels: [], datasets: [{ label: 'Altitud (m)', data: [], borderColor: '#2196F3', backgroundColor: 'rgba(33, 150, 243, 0.1)', fill: true, tension: 0.3 }] }, options: optComun";
-  html += "});";
-
-  // Gráfica Ambiental (Temp / Hum)
-  html += "const envChart = new Chart(document.getElementById('envChart').getContext('2d'), {";
-  html += "  type: 'line', data: { labels: [], datasets: [";
-  html += "    { label: 'Temp (°C)', data: [], borderColor: '#FF9800', backgroundColor: 'rgba(255, 152, 0, 0.1)', tension: 0.3 },";
-  html += "    { label: 'Humedad (%)', data: [], borderColor: '#00BCD4', backgroundColor: 'rgba(0, 188, 212, 0.1)', tension: 0.3 }";
-  html += "  ] }, options: optComun";
-  html += "});";
-
-  // Gráfica Calidad del Aire (PM2.5 y PM10)
-  html += "const pmChart = new Chart(document.getElementById('pmChart').getContext('2d'), {";
-  html += "  type: 'line', data: { labels: [], datasets: [";
-  html += "    { label: 'PM2.5', data: [], borderColor: '#E91E63', tension: 0.3 },";
-  html += "    { label: 'PM10', data: [], borderColor: '#9C27B0', tension: 0.3 }";
-  html += "  ] }, options: optComun";
-  html += "});";
-
-  html += "function fetchData() {";
-  html += "  fetch('/data').then(res => res.json()).then(data => {";
-  html += "    document.getElementById('pid').innerText = data.id;";
-  html += "    document.getElementById('palt').innerText = data.alt;";
-  html += "    document.getElementById('ptemp').innerText = data.temp;";
-  html += "    document.getElementById('phum').innerText = data.hum;";
-  html += "    document.getElementById('ppm1').innerText = data.pm.pm1;";
-  html += "    document.getElementById('ppm25').innerText = data.pm.pm25;";
-  html += "    document.getElementById('ppm10').innerText = data.pm.pm10;";
-  html += "    document.getElementById('ppres').innerText = data.pres;";
-
-  html += "    let timeNow = new Date().toLocaleTimeString();";
-
-  // Push Altitud
-  html += "    if (altChart.data.labels.length > 15) { altChart.data.labels.shift(); altChart.data.datasets[0].data.shift(); }";
-  html += "    altChart.data.labels.push(timeNow); altChart.data.datasets[0].data.push(data.alt); altChart.update();";
-
-  // Push Temp/Hum
-  html += "    if (envChart.data.labels.length > 15) { envChart.data.labels.shift(); envChart.data.datasets[0].data.shift(); envChart.data.datasets[1].data.shift(); }";
-  html += "    envChart.data.labels.push(timeNow); envChart.data.datasets[0].data.push(data.temp); envChart.data.datasets[1].data.push(data.hum); envChart.update();";
-
-  // Push PM2.5/PM10
-  html += "    if (pmChart.data.labels.length > 15) { pmChart.data.labels.shift(); pmChart.data.datasets[0].data.shift(); pmChart.data.datasets[1].data.shift(); }";
-  html += "    pmChart.data.labels.push(timeNow); pmChart.data.datasets[0].data.push(data.pm.pm25); pmChart.data.datasets[1].data.push(data.pm.pm10); pmChart.update();";
-
-  html += "  });";
-  html += "}";
-  html += "setInterval(fetchData, 2000);";
-  html += "</script>";
-  html += "</body></html>";
-
-  server.send(200, "text/html", html);
-}
-
-void handleData()
-{
-  server.send(200, "application/json", lastJsonRaw);
 }
