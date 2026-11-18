@@ -16,6 +16,7 @@ static void handleRoot()
 // JSON que consume la página cada 2 s. Los datos que no existen van como null.
 static void handleData()
 {
+  const Telemetria tel = telSnapshot(); // copia consistente (la escribe la tarea LoRa)
   JsonDocument doc;
 
   if (tel.ultimaRecepcion == 0)
@@ -64,10 +65,23 @@ static void handleData()
   server.send(200, "application/json", salida);
 }
 
+// El navegador pide el ícono solo; se responde "sin contenido" para no llenar el log de errores
+static void handleFavicon()
+{
+  server.send(204);
+}
+
+static void handleNoEncontrado()
+{
+  server.send(404, "text/plain", "No encontrado");
+}
+
 void webIniciar()
 {
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/favicon.ico", handleFavicon);
+  server.onNotFound(handleNoEncontrado);
   server.begin();
 }
 

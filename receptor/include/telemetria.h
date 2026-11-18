@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// Estado compartido: lo llena main.cpp (LoRa) y lo leen web_server.cpp y Telegram.
+// Estado compartido entre la recepción LoRa, el panel web, Telegram y los servicios en la nube.
 struct Telemetria
 {
   unsigned int id = 0;
@@ -19,11 +19,26 @@ struct Telemetria
   int rssiDbm = 0;
   unsigned long rssiTs = 0; // millis() de la última vez que llegó un byte RSSI (0 = nunca)
 
+  bool hayPaquete() const { return ultimaRecepcion != 0; }
+  unsigned long edadMs() const { return millis() - ultimaRecepcion; }
+
   // El RSSI se considera vigente si llegó en los últimos 10 s
   bool rssiVigente() const { return rssiTs != 0 && (millis() - rssiTs) < 10000UL; }
 };
 
-extern Telemetria tel; // definida en main.cpp
+// Debe llamarse una vez, antes de crear cualquier tarea que use la telemetría.
+void telIniciar();
+
+// La telemetría la escribe la tarea LoRa y la leen otras tareas, por eso nadie accede al dato
+// original: se pide una copia consistente con telSnapshot().
+Telemetria telSnapshot();
+
+// Guarda un paquete recién decodificado (conserva el RSSI y fija ultimaRecepcion = ahora).
+void telGuardarPaquete(const Telemetria &paquete);
+
+// Guarda el RSSI de un paquete. Devuelve false (y lo descarta) si aún no ha llegado ningún
+// paquete válido: antes del primero solo hay ruido de arranque.
+bool telGuardarRssi(int dbm);
 
 // Descripción cualitativa del enlace (umbrales aproximados, ajústalos con tus pruebas)
 inline const char *calidadRssi(int dbm)
