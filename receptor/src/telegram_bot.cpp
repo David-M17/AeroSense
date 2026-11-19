@@ -12,6 +12,10 @@ static constexpr unsigned long ENFRIAMIENTO_MS = 5UL * 60UL * 1000UL; // entre a
 static constexpr unsigned long SIN_SENAL_MS = 60000;          // 1 min sin paquetes => alerta
 static constexpr unsigned long CONSULTA_LENTA_MS = 1500;      // para el aviso de diagnóstico
 static constexpr float PM25_ALTO = 45.0;                      // umbral de ejemplo (µg/m3)
+
+// Aviso de enlace débil: por debajo de este RSSI el margen empieza a ser corto y conviene
+// acercar el globo. Ajústalo después de una prueba de alcance real.
+static constexpr int RSSI_BAJO_DBM = -100;
 static constexpr uint32_t TAREA_PILA = 12288;                 // TLS necesita mucha pila
 static constexpr UBaseType_t TAREA_PRIORIDAD = 1;
 static constexpr BaseType_t TAREA_NUCLEO = 1;
@@ -20,6 +24,7 @@ static constexpr BaseType_t TAREA_NUCLEO = 1;
 enum Alerta
 {
   ALERTA_SIN_SENAL,
+  ALERTA_RSSI_BAJO,
   ALERTA_PM25,
   ALERTA_TOTAL
 };
@@ -176,6 +181,10 @@ static void revisarAlertas()
 
   if (t.hayPaquete() && t.edadMs() > SIN_SENAL_MS)
     enviarAlerta(ALERTA_SIN_SENAL, "¡Sin señal LoRa del globo desde hace más de 1 minuto!");
+
+  if (t.rssiVigente() && t.rssiDbm < RSSI_BAJO_DBM)
+    enviarAlerta(ALERTA_RSSI_BAJO, "Enlace LoRa débil: " + String(t.rssiDbm) + " dBm (" +
+                                       calidadRssi(t.rssiDbm) + "). El globo se está alejando del alcance.");
 
   if (t.pmValido && t.pm25 > PM25_ALTO)
     enviarAlerta(ALERTA_PM25, "Nivel alto de partículas PM2.5 detectado: " + String(t.pm25) + " µg/m3");
