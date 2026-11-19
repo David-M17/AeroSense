@@ -1,4 +1,4 @@
-# 🛰️ AeroSense
+# AeroSense
 
 Telemetría en tiempo real para un globo cautivo con helio: mide variables atmosféricas y partículas suspendidas, las transmite por radio LoRa hasta una estación en tierra y las publica en la nube.
 
