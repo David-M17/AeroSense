@@ -79,26 +79,27 @@ static bool datosFrescos(const Telemetria &t)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Blynk (API HTTP). Datastreams virtuales que debes crear en la plantilla "AeroSense Globo":
-//   V0 altitud (m)   V1 temperatura (°C)   V2 PM2.5   V3 humedad (%)
-//   V4 presión (hPa) V5 PM1.0              V6 PM10    V7 RSSI (dBm)
+// Blynk (API HTTP). Datastreams virtuales de la plantilla "AeroSense Globo":
+//   V0 ID paquete   V1 altitud (m)   V2 temperatura (°C)   V3 humedad (%)   V4 presión (hPa)
+//   V5 PM1.0        V6 PM2.5         V7 PM10               V8 RSSI (dBm)
 // ---------------------------------------------------------------------------------------------
 
 static bool enviarBlynk(const Telemetria &t)
 {
   Consulta datos;
-  datos.agregar("v0", t.alt, 1);
-  datos.agregar("v1", t.temp, 1);
+  datos.agregar("v0", (int)t.id);
+  datos.agregar("v1", t.alt, 1);
+  datos.agregar("v2", t.temp, 1);
   datos.agregar("v3", t.hum);
   datos.agregar("v4", t.pres, 1);
   if (t.pmValido)
   {
-    datos.agregar("v2", t.pm25);
     datos.agregar("v5", t.pm1);
-    datos.agregar("v6", t.pm10);
+    datos.agregar("v6", t.pm25);
+    datos.agregar("v7", t.pm10);
   }
   if (t.rssiVigente())
-    datos.agregar("v7", t.rssiDbm);
+    datos.agregar("v8", t.rssiDbm);
 
   const String url = String("https://") + BLYNK_SERVIDOR + "/external/api/batch/update?token=" +
                      BLYNK_AUTH_TOKEN + "&" + datos.texto();
@@ -142,9 +143,9 @@ static bool enviarThingSpeak(const Telemetria &t)
 struct Servicio
 {
   const char *nombre;
-  const char *credencial;                // vacía = servicio desactivado
-  bool (*enviar)(const Telemetria &);    // publica una lectura; true si el servidor la aceptó
-  unsigned long desfaseInicialMs;        // evita que dos conexiones TLS coincidan en el tiempo
+  const char *credencial;             // vacía = servicio desactivado
+  bool (*enviar)(const Telemetria &); // publica una lectura; true si el servidor la aceptó
+  unsigned long desfaseInicialMs;     // evita que dos conexiones TLS coincidan en el tiempo
 };
 
 static const Servicio SERVICIOS[] = {

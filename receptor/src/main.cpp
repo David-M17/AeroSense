@@ -10,7 +10,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
-#include "secrets.h" // WIFI_SSID, WIFI_PASSWORD (ignorado por Git)
+#include "secrets.h" // WIFI_SSID, WIFI_PASSWORD
 #include "lora_rx.h"
 #include "nube.h"
 #include "telegram_bot.h"
@@ -42,7 +42,7 @@ void setup()
   delay(1000);
 
   Serial.println("\n==============================================");
-  Serial.println("🛰️ ESTACIÓN TERRESTRE: WEB, TELEGRAM Y NUBE");
+  Serial.println("            ESTACIÓN TERRESTRE                ");
   Serial.println("==============================================");
 
   telIniciar();  // primero: las demás tareas dependen del mutex
