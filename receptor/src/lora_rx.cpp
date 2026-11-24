@@ -173,6 +173,8 @@ static void registrarEnlace(int32_t id)
   {
     totalPerdidos += saltados;
     Serial.printf("   ⚠️ Se perdieron %ld paquete(s) antes del id %ld\n", (long)saltados, (long)id);
+    registroPcError("lora", "paquetes_perdidos", "faltaron " + String(saltados) + " paquete(s) antes del id " + String(id),
+                    (int)saltados);
   }
   ultimoId = id;
   totalRecibidos++;

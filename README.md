@@ -88,7 +88,7 @@ La estación de tierra puede guardar todo el historial en tu computadora (SQLite
 2. La ESP32 receptora debe estar en la misma red que la PC. Con el hotspot de Windows la PC es `192.168.137.1` (valor por defecto); para otra red, define `REGISTRO_PC_HOST` en `secrets.h`.
 3. Abre `http://localhost:8000` para ver el enlace por sesión, los errores y los últimos registros. `/exportar/registros.csv` y `/exportar/errores.csv` descargan todo.
 
-La columna `sesion` sube cada vez que el transmisor reinicia (su id vuelve a 0). Los paquetes perdidos se calculan en el servidor a partir de los saltos de id. Si el firewall de Windows pregunta, permite Python en redes privadas.
+La columna `sesion` sube cada vez que el transmisor reinicia (su id vuelve a 0). Hay tres tipos de falta que no hay que mezclar: `paquetes_perdidos` (los cuenta el receptor: nunca llegaron por LoRa), `registros_descartados` (el receptor sí los recibió, pero la PC no alcanzó a recibirlos y se saturó su cola) y `huecos_en_registros` (los ve el servidor por los saltos de id: suma de las dos anteriores). Los envíos van por lotes y un reintento nunca duplica registros. Si el firewall de Windows pregunta, permite Python en redes privadas.
 
 ## Datastreams / campos en la nube
 

@@ -13,8 +13,11 @@ import argparse
 import csv
 import io
 import json
+import re
 import sqlite3
+import time
 import threading
+import traceback
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,13 +41,20 @@ CREATE TABLE IF NOT EXISTS registros (
 CREATE TABLE IF NOT EXISTS errores (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   ocurrido_en  TEXT NOT NULL,
-  origen       TEXT NOT NULL,      -- lora, nube, telegram, sensor, receptor
+  origen       TEXT NOT NULL,      -- lora, nube, telegram, sensor, receptor, servidor
   tipo         TEXT NOT NULL,      -- código corto: paquetes_perdidos, blynk_fallo...
-  detalle      TEXT
+  detalle      TEXT,
+  cantidad     INTEGER NOT NULL DEFAULT 1   -- cuántos paquetes/eventos representa el renglón
 );
 CREATE INDEX IF NOT EXISTS ix_registros_hora ON registros (recibido_en);
 CREATE INDEX IF NOT EXISTS ix_errores_hora ON errores (ocurrido_en);
 """
+
+# Ocurrió en el receptor (pérdida real de radio) vs. visto por el servidor (huecos de cualquier causa)
+TIPO_RADIO = "paquetes_perdidos"        # el receptor vio saltar el id: el paquete nunca llegó por LoRa
+TIPO_COLA = "registros_descartados"     # el receptor los recibió pero no pudo mandarlos a la PC a tiempo
+TIPO_HUECO = "huecos_en_registros"      # el servidor ve ids que faltan (radio + cola)
+LENTA_S = 0.5                           # una petición que tarde más se anota en la consola
 
 
 def hora_de(hace_ms):
@@ -53,84 +63,144 @@ def hora_de(hace_ms):
 
 
 class Almacen:
-    """Toda la lógica de la base. Un candado serializa las escrituras (el servidor es multihilo)."""
+    """Toda la lógica de la base. Un candado serializa las escrituras (el servidor es multihilo);
+    cada lectura abre su propia conexión para no competir con ellas."""
 
     def __init__(self, ruta):
-        self._con = sqlite3.connect(ruta, check_same_thread=False)
-        self._con.row_factory = sqlite3.Row
-        self._con.execute("PRAGMA journal_mode=WAL")
+        self._ruta = ruta
+        self._con = self._conectar()
         self._con.executescript(ESQUEMA)
+        self._migrar()
         self._candado = threading.Lock()
         ultimo = self._con.execute(
             "SELECT sesion, id_paquete FROM registros ORDER BY id DESC LIMIT 1").fetchone()
         self._sesion = ultimo["sesion"] if ultimo else 0
         self._ultimo_id = ultimo["id_paquete"] if ultimo else None
 
+    def _conectar(self):
+        con = sqlite3.connect(self._ruta, timeout=5, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")  # con WAL basta y evita un fsync por cada commit
+        return con
+
+    def _migrar(self):
+        """Bases de la primera versión: sin `cantidad`, y con los huecos anotados como si fueran
+        pérdida real del radio. Se corrige para no mezclar las dos cosas."""
+        columnas = [c["name"] for c in self._con.execute("PRAGMA table_info(errores)")]
+        if "cantidad" in columnas:
+            return
+        copia = sqlite3.connect(self._ruta + ".respaldo")  # por si algo sale mal: la base original queda intacta
+        self._con.backup(copia)
+        copia.close()
+        print(f"  Base de la version anterior: copia de seguridad en {self._ruta}.respaldo")
+        self._con.execute("ALTER TABLE errores ADD COLUMN cantidad INTEGER NOT NULL DEFAULT 1")
+        for fila in self._con.execute("SELECT id, detalle FROM errores WHERE tipo = ?", (TIPO_RADIO,)).fetchall():
+            m = re.search(r"faltaron (\d+)", fila["detalle"] or "")
+            self._con.execute("UPDATE errores SET origen='servidor', tipo=?, cantidad=? WHERE id=?",
+                              (TIPO_HUECO, int(m.group(1)) if m else 1, fila["id"]))
+        self._con.execute("UPDATE errores SET tipo='registros_descartados', "
+                          "cantidad=1 WHERE tipo='cola_llena'")
+        self._con.commit()
+
     # --- escritura -------------------------------------------------------------------------
 
-    def guardar_registro(self, d):
-        """Guarda un paquete. Devuelve True si era nuevo, False si ya estaba (reintento)."""
+    def guardar_lote(self, paquetes, errores):
+        """Guarda todo en una sola transacción. Un elemento defectuoso se anota y se salta: nunca
+        debe impedir que el resto (ni los siguientes reintentos) se guarden. Devuelve (nuevos, rechazados)."""
+        nuevos = rechazados = 0
         with self._candado:
-            id_paquete = int(d["id"])
-            hora = hora_de(d.get("hace_ms", 0))
-
-            if self._ultimo_id is not None and id_paquete < self._ultimo_id:
-                self._sesion += 1  # el id retrocedió: el transmisor se reinició
-            elif self._ultimo_id is not None and id_paquete > self._ultimo_id + 1:
-                faltan = id_paquete - self._ultimo_id - 1
-                self._insertar_error(hora, "lora", "paquetes_perdidos",
-                                     f"faltaron {faltan} paquete(s) entre el id {self._ultimo_id} y el {id_paquete}")
-
-            pm = d.get("pm") or {}
-            acc = d.get("acc") or {}
-            temp, hum = d.get("temp"), d.get("hum")
-            if temp == 0 and hum == 0:  # el transmisor manda 0/0 cuando falla el DHT22
-                temp = hum = None
-                self._insertar_error(hora, "sensor", "dht22_sin_lectura", f"paquete {id_paquete}")
-
-            cur = self._con.execute(
-                "INSERT OR IGNORE INTO registros (recibido_en, sesion, id_paquete, alt, pres, temp, hum,"
-                " pm1, pm25, pm10, acc_x, acc_y, acc_z, rssi_dbm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (hora, self._sesion, id_paquete, d.get("alt"), d.get("pres"), temp, hum,
-                 pm.get("pm1"), pm.get("pm25"), pm.get("pm10"),
-                 acc.get("x"), acc.get("y"), acc.get("z"), d.get("rssi")))
+            for e in errores:
+                try:
+                    self._insertar_error(hora_de(e.get("hace_ms", 0)), str(e["origen"])[:20],
+                                         str(e["tipo"])[:40], str(e.get("detalle", ""))[:300],
+                                         int(e.get("cantidad", 1)))
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    rechazados += 1
+            for p in paquetes:
+                try:
+                    nuevos += self._guardar_paquete(p)
+                except (ValueError, KeyError, TypeError, AttributeError) as ex:
+                    rechazados += 1
+                    self._insertar_error(hora_de(0), "servidor", "paquete_invalido", f"{ex!r}"[:200], 1)
             self._con.commit()
-            if cur.rowcount:
-                self._ultimo_id = id_paquete
-            return bool(cur.rowcount)
+        return nuevos, rechazados
 
-    def guardar_error(self, d):
-        with self._candado:
-            self._insertar_error(hora_de(d.get("hace_ms", 0)), str(d["origen"])[:20],
-                                 str(d["tipo"])[:40], str(d.get("detalle", ""))[:300])
-            self._con.commit()
+    def _guardar_paquete(self, d):
+        """Devuelve 1 si el paquete era nuevo y 0 si ya estaba (reintento tras una respuesta perdida)."""
+        id_paquete = int(d["id"])
+        hora = hora_de(d.get("hace_ms", 0))
 
-    def _insertar_error(self, hora, origen, tipo, detalle):
-        self._con.execute("INSERT INTO errores (ocurrido_en, origen, tipo, detalle) VALUES (?,?,?,?)",
-                          (hora, origen, tipo, detalle))
+        # Un reintento (la respuesta se perdió pero el paquete sí se guardó) trae el mismo id y la misma
+        # hora de llegada. Un transmisor reiniciado repite ids, pero minutos después, no en el mismo instante.
+        t = datetime.strptime(hora, FORMATO_HORA)
+        ventana = ((t - timedelta(seconds=5)).strftime(FORMATO_HORA), (t + timedelta(seconds=5)).strftime(FORMATO_HORA))
+        if self._con.execute("SELECT 1 FROM registros WHERE id_paquete=? AND recibido_en BETWEEN ? AND ?",
+                             (id_paquete, *ventana)).fetchone():
+            return 0
 
-    # --- lectura ---------------------------------------------------------------------------
+        sesion = self._sesion
+        if self._ultimo_id is not None and id_paquete < self._ultimo_id:
+            sesion += 1  # el id retrocedió: el transmisor se reinició
+
+        if sesion != self._sesion:
+            self._sesion = sesion
+        elif self._ultimo_id is not None and id_paquete > self._ultimo_id + 1:
+            faltan = id_paquete - self._ultimo_id - 1
+            self._insertar_error(hora, "servidor", TIPO_HUECO,
+                                 f"faltan {faltan} registro(s) entre el id {self._ultimo_id} y el {id_paquete}", faltan)
+
+        pm = d.get("pm") or {}
+        acc = d.get("acc") or {}
+        temp, hum = d.get("temp"), d.get("hum")
+        if temp == 0 and hum == 0:  # el transmisor manda 0/0 cuando falla el DHT22
+            temp = hum = None
+            self._insertar_error(hora, "sensor", "dht22_sin_lectura", f"paquete {id_paquete}", 1)
+
+        self._con.execute(
+            "INSERT INTO registros (recibido_en, sesion, id_paquete, alt, pres, temp, hum,"
+            " pm1, pm25, pm10, acc_x, acc_y, acc_z, rssi_dbm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (hora, sesion, id_paquete, d.get("alt"), d.get("pres"), temp, hum,
+             pm.get("pm1"), pm.get("pm25"), pm.get("pm10"),
+             acc.get("x"), acc.get("y"), acc.get("z"), d.get("rssi")))
+        self._ultimo_id = id_paquete
+        return 1
+
+    def _insertar_error(self, hora, origen, tipo, detalle, cantidad):
+        self._con.execute("INSERT INTO errores (ocurrido_en, origen, tipo, detalle, cantidad) VALUES (?,?,?,?,?)",
+                          (hora, origen, tipo, detalle, cantidad))
+
+    # --- lectura (conexión propia en cada consulta) ----------------------------------------
+
+    def _leer(self, sql, params=()):
+        con = self._conectar()
+        try:
+            return [dict(f) for f in con.execute(sql, params)]
+        finally:
+            con.close()
 
     def ultimos(self, tabla, n):
         orden = "recibido_en" if tabla == "registros" else "ocurrido_en"
-        filas = self._con.execute(f"SELECT * FROM {tabla} ORDER BY {orden} DESC, id DESC LIMIT ?", (n,))
-        return [dict(f) for f in filas]
+        return self._leer(f"SELECT * FROM {tabla} ORDER BY {orden} DESC, id DESC LIMIT ?", (n,))
 
     def todo(self, tabla):
-        return [dict(f) for f in self._con.execute(f"SELECT * FROM {tabla} ORDER BY id")]
+        return self._leer(f"SELECT * FROM {tabla} ORDER BY id")
 
     def resumen(self):
         sesiones = []
-        for s in self._con.execute(
+        for s in self._leer(
                 "SELECT sesion, COUNT(*) AS recibidos, MIN(id_paquete) AS primero, MAX(id_paquete) AS ultimo,"
                 " MIN(recibido_en) AS desde, MAX(recibido_en) AS hasta FROM registros GROUP BY sesion ORDER BY sesion"):
             esperados = s["ultimo"] - s["primero"] + 1
-            sesiones.append({**dict(s), "esperados": esperados, "perdidos": esperados - s["recibidos"],
-                             "perdida_pct": round(100 * (esperados - s["recibidos"]) / esperados, 1)})
-        errores = [dict(f) for f in self._con.execute(
-            "SELECT origen, tipo, COUNT(*) AS veces, MAX(ocurrido_en) AS ultimo FROM errores"
-            " GROUP BY origen, tipo ORDER BY veces DESC")]
-        return {"sesiones": sesiones, "errores": errores}
+            faltan = esperados - s["recibidos"]
+            sesiones.append({**s, "esperados": esperados, "faltantes": faltan,
+                             "faltantes_pct": round(100 * faltan / esperados, 1)})
+        errores = self._leer(
+            "SELECT origen, tipo, SUM(cantidad) AS cantidad, COUNT(*) AS veces, MAX(ocurrido_en) AS ultimo"
+            " FROM errores GROUP BY origen, tipo ORDER BY veces DESC")
+        suma = {f["tipo"]: f["cantidad"] for f in errores}
+        totales = {"perdidos_radio": suma.get(TIPO_RADIO, 0), "descartados_cola": suma.get(TIPO_COLA, 0)}
+        return {"sesiones": sesiones, "errores": errores, "totales": totales}
 
 
 PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -147,6 +217,7 @@ PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="vie
 <small>Se actualiza cada 5 s · <a href="/exportar/registros.csv">registros.csv</a> ·
 <a href="/exportar/errores.csv">errores.csv</a></small>
 <h2>Enlace por sesión</h2><div class="wrap"><table id="ses"></table></div>
+<p id="tot"></p>
 <h2>Errores por tipo</h2><div class="wrap"><table id="err"></table></div>
 <h2>Últimos registros</h2><div class="wrap"><table id="reg"></table></div>
 <h2>Últimos errores</h2><div class="wrap"><table id="ult"></table></div>
@@ -157,12 +228,14 @@ function tabla(id,cols,filas){document.getElementById(id).innerHTML=
  filas.map(r=>'<tr>'+cols.map(c=>'<td'+(c[2]?' class="t"':'')+'>'+(c[3]?c[3](r):f(r[c[1]],c[4]))+'</td>').join('')+'</tr>').join('')}
 async function cargar(){
  const [r,e,s]=await Promise.all(['/api/registros?n=30','/api/errores?n=30','/api/resumen'].map(u=>fetch(u).then(x=>x.json())));
- tabla('ses',[['Sesión','sesion'],['Desde','desde',1],['Hasta','hasta',1],['Recibidos','recibidos'],['Esperados','esperados'],
-  ['Perdidos','perdidos'],['Pérdida %','perdida_pct',0,x=>'<span class="'+(x.perdida_pct>5?'malo':'ok')+'">'+x.perdida_pct+'</span>']],s.sesiones);
- tabla('err',[['Origen','origen',1],['Tipo','tipo',1],['Veces','veces'],['Última vez','ultimo',1]],s.errores);
+ tabla('ses',[['Sesión','sesion'],['Desde','desde',1],['Hasta','hasta',1],['Registros en la PC','recibidos'],['Esperados','esperados'],
+  ['Faltan','faltantes'],['Faltan %','faltantes_pct',0,x=>'<span class="'+(x.faltantes_pct>5?'malo':'ok')+'">'+x.faltantes_pct+'</span>']],s.sesiones);
+ document.getElementById('tot').innerHTML='Perdidos de verdad por el radio (los cuenta el receptor): <b>'+s.totales.perdidos_radio+
+  '</b> · Descartados por el receptor porque la PC no alcanzó a recibirlos: <b>'+s.totales.descartados_cola+'</b><br><small>«Faltan» suma las dos causas.</small>';
+ tabla('err',[['Origen','origen',1],['Tipo','tipo',1],['Veces','veces'],['Cantidad','cantidad'],['Última vez','ultimo',1]],s.errores);
  tabla('reg',[['Hora','recibido_en',1],['Ses','sesion'],['Id','id_paquete'],['Alt m','alt',0,0,1],['hPa','pres',0,0,1],['°C','temp',0,0,1],
   ['%HR','hum'],['PM1','pm1'],['PM2.5','pm25'],['PM10','pm10'],['ax','acc_x',0,0,2],['ay','acc_y',0,0,2],['az','acc_z',0,0,2],['RSSI','rssi_dbm']],r);
- tabla('ult',[['Hora','ocurrido_en',1],['Origen','origen',1],['Tipo','tipo',1],['Detalle','detalle',1]],e);
+ tabla('ult',[['Hora','ocurrido_en',1],['Origen','origen',1],['Tipo','tipo',1],['Cant.','cantidad'],['Detalle','detalle',1]],e);
 }
 cargar();setInterval(cargar,5000);
 </script></html>"""
@@ -170,14 +243,23 @@ cargar();setInterval(cargar,5000);
 
 def crear_manejador(almacen):
     class Manejador(BaseHTTPRequestHandler):
+        timeout = 10  # un cliente que se cuelga no debe dejar un hilo esperando para siempre
+
         def log_message(self, formato, *args):  # silencia el log por petición
             pass
+
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionError, TimeoutError):
+                pass  # la ESP32 cortó la conexión (Wi-Fi, reinicio): no es un fallo del servidor
 
         def _responder(self, codigo, cuerpo, tipo="application/json"):
             datos = cuerpo.encode("utf-8") if isinstance(cuerpo, str) else cuerpo
             self.send_response(codigo)
             self.send_header("Content-Type", tipo + "; charset=utf-8")
             self.send_header("Content-Length", str(len(datos)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(datos)
 
@@ -188,11 +270,14 @@ def crear_manejador(almacen):
                 escritor = csv.DictWriter(salida, fieldnames=list(filas[0]))
                 escritor.writeheader()
                 escritor.writerows(filas)
-            self._responder(200, "﻿" + salida.getvalue(), "text/csv")  # BOM: Excel lee bien los acentos
+            self._responder(200, "\ufeff" + salida.getvalue(), "text/csv")  # BOM: Excel lee bien los acentos
 
         def do_GET(self):
             url = urlparse(self.path)
-            n = min(max(int(parse_qs(url.query).get("n", ["100"])[0]), 1), 5000)
+            try:
+                n = min(max(int(parse_qs(url.query).get("n", ["100"])[0]), 1), 5000)
+            except ValueError:
+                n = 100
             if url.path == "/":
                 self._responder(200, PAGINA, "text/html")
             elif url.path == "/api/registros":
@@ -209,19 +294,36 @@ def crear_manejador(almacen):
                 self._responder(404, '{"error":"no existe"}')
 
         def do_POST(self):
+            inicio = time.monotonic()
             try:
                 largo = int(self.headers.get("Content-Length", 0))
-                datos = json.loads(self.rfile.read(largo) or b"{}")
-                if self.path == "/api/registro":
-                    nuevo = almacen.guardar_registro(datos)
-                    self._responder(200, json.dumps({"ok": True, "nuevo": nuevo}))
+                crudo = self.rfile.read(largo) or b"{}"
+                leido = time.monotonic() - inicio
+                datos = json.loads(crudo)
+                if self.path == "/api/lote":
+                    nuevos, rechazados = almacen.guardar_lote(datos.get("paquetes", []), datos.get("errores", []))
+                    cuerpo = {"ok": True, "nuevos": nuevos, "rechazados": rechazados}
+                elif self.path == "/api/registro":
+                    nuevos, rechazados = almacen.guardar_lote([datos], [])
+                    cuerpo = {"ok": True, "nuevos": nuevos, "rechazados": rechazados}
                 elif self.path == "/api/error":
-                    almacen.guardar_error(datos)
-                    self._responder(200, '{"ok":true}')
+                    _, rechazados = almacen.guardar_lote([], [datos])
+                    cuerpo = {"ok": True, "rechazados": rechazados}
                 else:
                     self._responder(404, '{"error":"no existe"}')
-            except (ValueError, KeyError, TypeError) as e:
-                self._responder(400, json.dumps({"error": f"petición inválida: {e}"}))
+                    return
+                self._responder(200, json.dumps(cuerpo))
+                total = time.monotonic() - inicio
+                if total > LENTA_S:
+                    print(f"[{datetime.now():%H:%M:%S}] peticion lenta {self.path}: {total:.2f} s "
+                          f"(leer cuerpo {leido:.2f} s, guardar+responder {total - leido:.2f} s)")
+            except (ConnectionError, TimeoutError):
+                raise  # lo silencia handle()
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
+                self._responder(400, json.dumps({"error": f"peticion invalida: {e}"}))
+            except Exception:  # cualquier otro fallo: respuesta explícita en vez de cortar la conexión
+                print(f"[{datetime.now():%H:%M:%S}] ERROR en {self.path}:\n{traceback.format_exc()}")
+                self._responder(500, '{"error":"fallo interno del servidor"}')
 
     return Manejador
 
