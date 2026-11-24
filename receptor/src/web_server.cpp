@@ -5,6 +5,7 @@
 
 #include "telemetria.h"
 #include "web_page.h"
+#include "modelo_glb.h"
 
 static WebServer server(80);
 
@@ -65,6 +66,15 @@ static void handleData()
   server.send(200, "application/json", salida);
 }
 
+// Modelo 3D del módulo para el visor de actitud. Va comprimido con gzip en flash y el
+// navegador lo descomprime solo; se cachea un día para no volver a pedirlo en cada recarga.
+static void handleModelo()
+{
+  server.sendHeader("Content-Encoding", "gzip");
+  server.sendHeader("Cache-Control", "max-age=86400");
+  server.send_P(200, "model/gltf-binary", (const char *)MODELO_GLB_GZ, MODELO_GLB_GZ_LEN);
+}
+
 // El navegador pide el ícono solo; se responde "sin contenido" para no llenar el log de errores
 static void handleFavicon()
 {
@@ -80,6 +90,7 @@ void webIniciar()
 {
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/modelo.glb", handleModelo);
   server.on("/favicon.ico", handleFavicon);
   server.onNotFound(handleNoEncontrado);
   server.begin();

@@ -6,6 +6,7 @@
 //   web_server   panel web con gráficas (se atiende desde loop())
 //   telegram_bot comandos y alertas (tarea propia)
 //   nube         publicación en Blynk y ThingSpeak (una tarea por servicio)
+//   registro_pc  guarda paquetes y errores en la base de datos de la PC (tarea propia)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -13,6 +14,7 @@
 #include "secrets.h" // WIFI_SSID, WIFI_PASSWORD
 #include "lora_rx.h"
 #include "nube.h"
+#include "registro_pc.h"
 #include "telegram_bot.h"
 #include "telemetria.h"
 #include "web_server.h"
@@ -48,10 +50,13 @@ void setup()
   telIniciar();  // primero: las demás tareas dependen del mutex
   loraIniciar(); // antes del Wi-Fi: no se pierde ningún paquete mientras conecta
 
+  registroPcIniciar(); // sus colas esperan hasta que haya Wi-Fi
   conectarWifi();
   webIniciar();
+#ifndef SIN_NUBE // prueba de diagnóstico: "pio run -e diagnostico" apaga Telegram y la nube
   telegramIniciar();
   nubeIniciar();
+#endif
 }
 
 void loop()

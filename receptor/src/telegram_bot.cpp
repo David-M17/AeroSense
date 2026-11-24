@@ -5,12 +5,15 @@
 
 #include "secrets.h" // BOT_TOKEN, CHAT_ID (ignorado por Git)
 #include "telegram_bot.h"
+#include "registro_pc.h"
+#include "tls_bloqueo.h"
 #include "telemetria.h"
 
 static constexpr unsigned long INTERVALO_SONDEO_MS = 2000;    // revisar mensajes cada 2 s
 static constexpr unsigned long ENFRIAMIENTO_MS = 5UL * 60UL * 1000UL; // entre avisos iguales
 static constexpr unsigned long SIN_SENAL_MS = 60000;          // 1 min sin paquetes => alerta
 static constexpr unsigned long CONSULTA_LENTA_MS = 1500;      // para el aviso de diagnóstico
+static constexpr unsigned long CONSULTA_MUY_LENTA_MS = 10000; // esta sí se anota como error en la PC
 static constexpr float PM25_ALTO = 45.0;                      // umbral de ejemplo (µg/m3)
 
 // Aviso de enlace débil: por debajo de este RSSI el margen empieza a ser corto y conviene
@@ -62,12 +65,17 @@ static void tareaTelegram(void *parametro)
     if (WiFi.status() == WL_CONNECTED)
     {
       const unsigned long inicio = millis();
-      sondearMensajes();
-      revisarAlertas();
+      {
+        BloqueoTls bloqueo; // una sola conexión TLS a la vez en todo el firmware
+        sondearMensajes();
+        revisarAlertas();
+      }
 
       const unsigned long duracion = millis() - inicio;
       if (duracion > CONSULTA_LENTA_MS)
         Serial.printf("⏱ Telegram tardó %lu ms (no bloquea el panel)\n", duracion);
+      if (duracion > CONSULTA_MUY_LENTA_MS)
+        registroPcError("telegram", "consulta_lenta", String(duracion) + " ms");
     }
     vTaskDelay(pdMS_TO_TICKS(INTERVALO_SONDEO_MS));
   }
@@ -173,6 +181,9 @@ static void enviarAlerta(Alerta tipo, const String &texto)
 
   bot.sendMessage(CHAT_ID, "⚠️ *ALERTA AEROSENSE:* " + texto, "Markdown");
   ultimaAlerta[tipo] = millis();
+
+  static const char *const TIPOS[ALERTA_TOTAL] = {"sin_senal", "rssi_bajo", "pm25_alto"};
+  registroPcError("lora", TIPOS[tipo], texto);
 }
 
 static void revisarAlertas()

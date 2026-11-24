@@ -5,7 +5,9 @@
 
 #include "secrets.h" // BLYNK_AUTH_TOKEN, THINGSPEAK_API_KEY (ignorado por Git)
 #include "nube.h"
+#include "registro_pc.h"
 #include "telemetria.h"
+#include "tls_bloqueo.h"
 
 // ThingSpeak (plan gratuito) acepta como máximo 1 actualización cada 15 s; se usa el mismo
 // periodo para Blynk.
@@ -163,9 +165,16 @@ static void tareaServicio(void *parametro)
     const Telemetria t = telSnapshot();
     if (WiFi.status() == WL_CONNECTED && datosFrescos(t))
     {
+      BloqueoTls bloqueo; // una sola conexión TLS a la vez en todo el firmware
       const unsigned long inicio = millis();
       const bool ok = servicio.enviar(t);
       Serial.printf("☁️ %s: %s (%lu ms)\n", servicio.nombre, ok ? "enviado" : "FALLÓ", millis() - inicio);
+      if (!ok)
+      {
+        Serial.printf("   Memoria libre: %u bytes (bloque mayor: %u)\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+        registroPcError("nube", (String(servicio.nombre) + "_fallo").c_str(),
+                        "memoria libre " + String(ESP.getFreeHeap()) + ", bloque mayor " + String(ESP.getMaxAllocHeap()));
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(PERIODO_ENVIO_MS));
   }

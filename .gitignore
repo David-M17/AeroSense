@@ -7,3 +7,8 @@
 secrets.h
 **/include/secrets.h
 .env
+
+# Base de datos local del servidor de registro
+*.db
+*.db-wal
+*.db-shm

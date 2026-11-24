@@ -3,8 +3,9 @@
 
 // Página del panel web (se guarda en flash, no en RAM).
 // Se edita aquí como HTML normal: el literal R"rawliteral(...)" evita tener que escapar comillas.
-// La página pide /data cada segundo. Chart.js se carga de un CDN, así que el navegador que
-// abra el panel necesita internet; el resto (actitud 3D, indicadores) funciona sin conexión.
+// La página pide /data cada segundo. Chart.js y Three.js se cargan de un CDN, así que el
+// navegador que abra el panel necesita internet para las gráficas y la vista 3D. El modelo 3D
+// del módulo (/modelo.glb) sí lo sirve el propio ESP32 (ver modelo_glb.h).
 static const char PAGINA_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -77,52 +78,18 @@ header {
 .fila b { font-weight: 500; font-variant-numeric: tabular-nums; }
 
 /* ============================ Actitud 3D ============================ */
-/* El módulo es un prisma rectangular. Se dibuja con transformaciones CSS 3D y se inclina
-   según el alabeo y el cabeceo calculados a partir del acelerómetro. */
+/* Visor Three.js con el modelo real del módulo. Se inclina según el acelerómetro;
+   el usuario puede girar la cámara arrastrando (no cambia la actitud medida). */
 .escena {
-  height: 260px;
-  perspective: 760px;
-  display: flex; align-items: center; justify-content: center;
-  overflow: hidden;
+  position: relative; height: 300px;
+  border-radius: 6px; overflow: hidden;
+  background: radial-gradient(ellipse at 50% 40%, #0f1a26 0%, var(--panel) 70%);
 }
-/* .mundo mide lo mismo que el módulo: así el suelo se centra respecto a él */
-.mundo {
-  position: relative; width: 70px; height: 110px;
-  transform-style: preserve-3d;
-  transform: rotateX(-16deg) rotateY(-28deg); /* punto de vista fijo del observador */
+.escena canvas { display: block; width: 100%; height: 100%; max-height: none; cursor: grab; }
+.escena .aviso3d {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--tenue); text-align: center; padding: 20px;
 }
-.suelo {
-  position: absolute; width: 260px; height: 260px;
-  left: -95px; top: -75px; /* centrado sobre el módulo (70x110) */
-  transform: rotateX(90deg) translateZ(-90px);
-  background-image:
-    linear-gradient(rgba(0,212,255,0.16) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,212,255,0.16) 1px, transparent 1px);
-  background-size: 24px 24px;
-  border: 1px solid rgba(0,212,255,0.25);
-}
-.modulo {
-  position: relative; width: 70px; height: 110px;
-  transform-style: preserve-3d;
-  transition: transform 0.35s linear; /* suaviza el salto entre paquetes */
-}
-.cara {
-  position: absolute;
-  border: 1px solid var(--acento);
-  background: rgba(0,212,255,0.10);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; letter-spacing: 1px; color: var(--acento);
-}
-.cara.frente, .cara.atras  { width: 70px; height: 110px; left: 0;  top: 0; }
-.cara.der,    .cara.izq    { width: 50px; height: 110px; left: 10px; top: 0; }
-.cara.arriba, .cara.abajo  { width: 70px; height: 50px;  left: 0;  top: 30px; }
-
-.cara.frente { transform: translateZ(25px); }
-.cara.atras  { transform: rotateY(180deg) translateZ(25px); }
-.cara.der    { transform: rotateY(90deg)  translateZ(35px); }
-.cara.izq    { transform: rotateY(-90deg) translateZ(35px); }
-.cara.arriba { transform: rotateX(90deg)  translateZ(55px); background: rgba(0,212,255,0.26); }
-.cara.abajo  { transform: rotateX(-90deg) translateZ(55px); background: rgba(0,212,255,0.04); }
 
 .angulos { display: flex; justify-content: space-around; text-align: center; margin-top: 6px; }
 .angulos div span { display: block; font-size: 10px; letter-spacing: 1px; color: var(--tenue); }
@@ -177,18 +144,8 @@ canvas { max-height: 170px; }
     <!-- Actitud del módulo -->
     <div class="tarjeta">
       <p class="titulo">Actitud del módulo</p>
-      <div class="escena">
-        <div class="mundo">
-          <div class="suelo"></div>
-          <div class="modulo" id="modulo">
-            <div class="cara frente"></div>
-            <div class="cara atras"></div>
-            <div class="cara der"></div>
-            <div class="cara izq"></div>
-            <div class="cara arriba">ARRIBA</div>
-            <div class="cara abajo"></div>
-          </div>
-        </div>
+      <div class="escena" id="escena3d">
+        <div class="aviso3d" id="aviso3d">Cargando modelo 3D…</div>
       </div>
       <div class="angulos">
         <div><span>ALABEO</span><b id="proll">--</b>°</div>
@@ -282,7 +239,7 @@ function pintarRssi(dbm) {
 /* ============================ Actitud ============================ */
 // El acelerómetro mide la gravedad, así que con el módulo en reposo su vector apunta "abajo"
 // y de ahí salen el alabeo y el cabeceo. En caída o sacudida la lectura deja de ser fiable.
-// Si el prisma se inclina al revés que el módulo real, cambia el signo aquí.
+// La rotación del modelo la hace el visor 3D (script de módulo al final de la página).
 
 function pintarActitud(acc) {
   if (!acc || !hayValor(acc.x)) return;
@@ -294,7 +251,7 @@ function pintarActitud(acc) {
   var cabeceo = grados(Math.atan2(-ax, Math.sqrt(ay * ay + az * az)));
   var inclinacion = magnitud > 0 ? grados(Math.acos(Math.min(1, Math.abs(az) / magnitud))) : 0;
 
-  $("modulo").style.transform = "rotateZ(" + alabeo.toFixed(1) + "deg) rotateX(" + cabeceo.toFixed(1) + "deg)";
+  if (window.visor3D) window.visor3D.orientar(ax, ay, az);
 
   texto("proll", alabeo, 0);
   texto("ppitch", cabeceo, 0);
@@ -392,6 +349,95 @@ function pedirDatos() {
 
 setInterval(pedirDatos, INTERVALO_MS);
 pedirDatos();
+</script>
+
+<!-- ============================ Visor 3D ============================ -->
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+var contenedor = document.getElementById("escena3d");
+var aviso = document.getElementById("aviso3d");
+
+/* --- Escena, cámara y luces --- */
+var render = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+render.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+render.outputColorSpace = THREE.SRGBColorSpace;
+render.toneMapping = THREE.ACESFilmicToneMapping;
+contenedor.appendChild(render.domElement);
+
+var escena = new THREE.Scene();
+escena.environment = new THREE.PMREMGenerator(render).fromScene(new RoomEnvironment(), 0.04).texture;
+var luz = new THREE.DirectionalLight(0xffffff, 1.4);
+luz.position.set(0.5, 1, 1);
+escena.add(luz);
+
+var camara = new THREE.PerspectiveCamera(32, 1, 0.01, 10);
+camara.position.set(0.22, 0.12, 0.52);
+
+var controles = new OrbitControls(camara, render.domElement);
+controles.enableDamping = true;
+controles.enablePan = false;
+controles.minDistance = 0.3;
+controles.maxDistance = 1.2;
+
+// Suelo de referencia (no gira con el módulo)
+var suelo = new THREE.GridHelper(0.6, 20, 0x00d4ff, 0x123044);
+suelo.position.y = -0.17;
+suelo.material.transparent = true;
+suelo.material.opacity = 0.45;
+escena.add(suelo);
+
+/* --- Actitud ---
+   Ejes del ADXL345 tal como está montado en el tope de la caja:
+     X del sensor -> -X del modelo (hacia el DHT22)
+     Y del sensor -> +Z del modelo (hacia la etiqueta AeroSense)
+     Z del sensor -> +Y del modelo (hacia arriba)
+   En reposo el acelerómetro mide +1 g apuntando hacia arriba; se busca el giro que lleva
+   ese vector (en ejes del modelo) a la vertical del mundo. El giro alrededor de la vertical
+   (rumbo) no se puede medir con un acelerómetro, así que se deja fijo. */
+var pivote = new THREE.Group();
+escena.add(pivote);
+var objetivo = new THREE.Quaternion();
+var VERTICAL = new THREE.Vector3(0, 1, 0);
+
+function orientar(ax, ay, az) {
+  var arriba = new THREE.Vector3(-ax, az, ay);
+  if (arriba.lengthSq() < 1e-6) return;
+  objetivo.setFromUnitVectors(arriba.normalize(), VERTICAL);
+}
+window.visor3D = { orientar: orientar };
+
+/* --- Modelo servido por el ESP32 --- */
+new GLTFLoader().load("/modelo.glb",
+  function (gltf) { pivote.add(gltf.scene); aviso.remove(); },
+  undefined,
+  function () { aviso.innerText = "No se pudo cargar el modelo 3D"; });
+
+/* --- Bucle de dibujo --- */
+function ajustarTamano() {
+  var w = contenedor.clientWidth, h = contenedor.clientHeight;
+  render.setSize(w, h, false);
+  camara.aspect = w / h;
+  camara.updateProjectionMatrix();
+}
+window.addEventListener("resize", ajustarTamano);
+ajustarTamano();
+
+function dibujar() {
+  pivote.quaternion.slerp(objetivo, 0.12); // suaviza el salto entre paquetes
+  controles.update();
+  render.render(escena, camara);
+  requestAnimationFrame(dibujar);
+}
+dibujar();
 </script>
 </body>
 </html>
