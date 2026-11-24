@@ -34,7 +34,7 @@ static void conectarWifi()
     Serial.print(".");
   }
   Serial.println("\n¡Conectado a Wi-Fi con éxito!");
-  Serial.print("🌐 Panel Web en Vivo: http://");
+  Serial.print("Panel Web en Vivo: http://");
   Serial.println(WiFi.localIP());
 }
 
