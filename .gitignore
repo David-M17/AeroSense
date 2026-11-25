@@ -13,3 +13,6 @@ secrets.h
 *.db-wal
 *.db-shm
 *.respaldo
+
+# Copias del monitor serie (filtro log2file)
+*.log

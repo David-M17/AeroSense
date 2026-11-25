@@ -25,6 +25,9 @@ static constexpr unsigned long PANEL_LENTO_MS = 1500;
 static void conectarWifi()
 {
   WiFi.mode(WIFI_STA);
+  // Sin ahorro de energía: con él, el radio Wi-Fi duerme entre balizas y las confirmaciones TCP
+  // se atrasan o se pierden (envíos a la PC de 3 a 9 s, Telegram lento). La estación va a corriente.
+  WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.print("Conectando a Wi-Fi");

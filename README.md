@@ -90,6 +90,8 @@ La estación de tierra puede guardar todo el historial en tu computadora (SQLite
 
 La columna `sesion` sube cada vez que el transmisor reinicia (su id vuelve a 0). Hay tres tipos de falta que no hay que mezclar: `paquetes_perdidos` (los cuenta el receptor: nunca llegaron por LoRa), `registros_descartados` (el receptor sí los recibió, pero la PC no alcanzó a recibirlos y se saturó su cola) y `huecos_en_registros` (los ve el servidor por los saltos de id: suma de las dos anteriores). Los envíos van por lotes y un reintento nunca duplica registros. Si el firewall de Windows pregunta, permite Python en redes privadas.
 
+El monitor serie del receptor guarda una copia con hora de cada línea en `receptor/platformio-device-monitor-*.log` (filtro `log2file`), porque la terminal de VS Code solo conserva las últimas líneas.
+
 ## Datastreams / campos en la nube
 
 | # | Blynk (V) | ThingSpeak (Field) |

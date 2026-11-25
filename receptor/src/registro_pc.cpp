@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <esp_system.h>
 
 #include "registro_pc.h"
@@ -21,7 +21,7 @@ static constexpr size_t COLA_ERRORES = 20;
 static constexpr size_t LOTE_PAQUETES = 10; // se mandan juntos: una conexión por lote, no por paquete
 static constexpr size_t LOTE_ERRORES = 5;
 static constexpr int TIMEOUT_CONEXION_MS = 1500;
-static constexpr int TIMEOUT_RESPUESTA_MS = 5000; // la PC puede tardar en guardar; mejor esperar que reenviar
+static constexpr unsigned long TIMEOUT_RESPUESTA_MS = 5000; // la PC puede tardar en guardar; mejor esperar que reenviar
 static constexpr unsigned long ESPERA_VACIA_MS = 1000;
 static constexpr unsigned long ESPERA_CON_PENDIENTES_MS = 20;
 static constexpr unsigned long ESPERA_FALLO_MIN_MS = 2000;
@@ -71,6 +71,7 @@ static void tareaRegistro(void *parametro);
 static void sacarLote(Lote &lote);
 static void devolverLote(const Lote &lote);
 static int enviarLote(const Lote &lote);
+static int postearJson(const char *ruta, const String &cuerpo);
 static const char *motivoReinicio();
 static void copiarAscii(char *destino, size_t tam, const String &origen);
 
@@ -266,19 +267,60 @@ static int enviarLote(const Lote &lote)
 
   String cuerpo;
   serializeJson(doc, cuerpo);
+  return postearJson("/api/lote", cuerpo);
+}
 
+// Petición HTTP mínima. Se arma completa (encabezados + cuerpo) y sale en una sola escritura con
+// Nagle apagado: así nada se queda esperando la confirmación TCP de un segmento anterior. Con
+// HTTPClient los encabezados y el cuerpo salían por separado y, si esa confirmación se perdía,
+// el cuerpo llegaba a la PC 3, 6 o 9 s después (retransmisiones de TCP).
+static int postearJson(const char *ruta, const String &cuerpo)
+{
   WiFiClient cliente;
-  HTTPClient http;
-  http.setReuse(false);
-  http.setConnectTimeout(TIMEOUT_CONEXION_MS);
-  http.setTimeout(TIMEOUT_RESPUESTA_MS);
-  if (!http.begin(cliente, REGISTRO_PC_HOST, REGISTRO_PC_PUERTO, "/api/lote"))
+  if (!cliente.connect(REGISTRO_PC_HOST, REGISTRO_PC_PUERTO, TIMEOUT_CONEXION_MS))
     return -1;
+  cliente.setNoDelay(true);
 
-  http.addHeader("Content-Type", "application/json");
-  const int codigo = http.POST(cuerpo);
-  http.end();
-  return codigo;
+  String peticion;
+  peticion.reserve(cuerpo.length() + 160);
+  peticion += "POST ";
+  peticion += ruta;
+  peticion += " HTTP/1.1\r\nHost: " REGISTRO_PC_HOST "\r\n"
+              "Content-Type: application/json\r\nConnection: close\r\nContent-Length: ";
+  peticion += cuerpo.length();
+  peticion += "\r\n\r\n";
+  peticion += cuerpo;
+
+  if (cliente.write(reinterpret_cast<const uint8_t *>(peticion.c_str()), peticion.length()) != peticion.length())
+  {
+    cliente.stop();
+    return -2;
+  }
+
+  // Solo interesa la primera línea: "HTTP/1.0 200 OK"
+  String linea;
+  const unsigned long inicio = millis();
+  while (millis() - inicio < TIMEOUT_RESPUESTA_MS)
+  {
+    while (cliente.available())
+    {
+      const char c = (char)cliente.read();
+      if (c == '\n')
+      {
+        int codigo = 0;
+        sscanf(linea.c_str(), "HTTP/%*s %d", &codigo);
+        cliente.stop();
+        return codigo > 0 ? codigo : -3; // respondió algo que no es HTTP
+      }
+      if (linea.length() < 40)
+        linea += c;
+    }
+    if (!cliente.connected())
+      break;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  cliente.stop();
+  return -11; // sin respuesta a tiempo
 }
 
 static const char *motivoReinicio()
