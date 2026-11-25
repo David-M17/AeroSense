@@ -1,111 +1,254 @@
+<div align="center">
+
+<img src="docs/globo.png" alt="Módulo AeroSense suspendido de globos" width="220">
+
 # AeroSense
 
-Telemetría en tiempo real para un globo cautivo con helio: mide variables atmosféricas y partículas suspendidas, las transmite por radio LoRa hasta una estación en tierra y las publica en la nube.
+**Telemetría en tiempo real para un globo cautivo con helio**
 
-Proyecto para Arquitectura de Computadoras — Instituto Tecnológico de Zacatepec (TecNM). Equipo: Mastache De la Paz David · Ramírez Díaz Salvador · Sánchez Julián Isaac.
+Mide variables atmosféricas y partículas suspendidas, las transmite por LoRa a una estación en tierra y las publica en un panel web propio, Telegram, Blynk y ThingSpeak, con historial completo en SQLite.
+
+![ESP32](https://img.shields.io/badge/MCU-ESP32-E7352C?logo=espressif&logoColor=white)
+![PlatformIO](https://img.shields.io/badge/Build-PlatformIO-F5822A?logo=platformio&logoColor=white)
+![LoRa](https://img.shields.io/badge/Radio-LoRa%20915%20MHz-0E8A16)
+![FreeRTOS](https://img.shields.io/badge/RTOS-FreeRTOS-5A9E3F)
+![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
+![SQLite](https://img.shields.io/badge/DB-SQLite-003B57?logo=sqlite&logoColor=white)
+
+Arquitectura de Computadoras · Instituto Tecnológico de Zacatepec (TecNM)
+
+</div>
+
+---
+
+## Contenido
+
+- [Características](#características)
+- [Arquitectura](#arquitectura)
+- [Hardware](#hardware)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Puesta en marcha](#puesta-en-marcha)
+- [Formato del paquete](#formato-del-paquete)
+- [Registro en la PC](#registro-en-la-pc)
+- [Resultados de las pruebas](#resultados-de-las-pruebas)
+- [Problemas conocidos y soluciones](#problemas-conocidos-y-soluciones)
+- [Equipo](#equipo)
+
+## Características
+
+- **Sensado:** temperatura y humedad (DHT22), presión y altitud (BMP180), actitud y vibración (ADXL345), material particulado PM1.0 / PM2.5 / PM10 (PMS7003M).
+- **Enlace LoRa** E220-900T22D a 915 MHz con RSSI por paquete y conteo de paquetes perdidos.
+- **Estación terrestre multitarea** con FreeRTOS: la recepción por radio nunca se bloquea por Wi-Fi o TLS.
+- **Panel web** servido por el propio ESP32: gráficas en vivo y un modelo 3D del módulo que se inclina según el acelerómetro.
+- **Bot de Telegram** con comandos y alertas (sin señal, PM2.5 alto, RSSI bajo).
+- **Nube:** Blynk y ThingSpeak.
+- **Historial en la PC:** servidor en Python sin dependencias que guarda registros y errores en SQLite, con visor web y exportación a CSV.
+
+<div align="center">
+<img src="docs/panel.png" alt="Panel web de la estación terrestre" width="820">
+<br><sub>Panel web de la estación terrestre.</sub>
+</div>
 
 ## Arquitectura
 
 ```
-┌──────────────────┐   LoRa 915 MHz   ┌────────────────────┐
-│   Globo (ESP32)  │ ──────────────▶ │ Tierra (ESP32)     │
-│ DHT22, BMP180,   │   E220-900T22D   │  E220-900T22D      │
-│ ADXL345, PMS7003M│                  │                    │
+┌──────────────────┐   LoRa 915 MHz   ┌────────────────────┐   HTTP (LAN)   ┌──────────────────┐
+│   Globo (ESP32)  │ ───────────────▶ │  Tierra (ESP32)    │ ─────────────▶ │  PC: servidor    │
+│ DHT22, BMP180,   │   E220-900T22D   │   E220-900T22D     │                │  Python + SQLite │
+│ ADXL345, PMS7003M│                  │                    │                └──────────────────┘
 └──────────────────┘                  └─────────┬──────────┘
                                                 │ Wi-Fi
-                       ┌────────────┬───────────┼───────────┬────────────┐
-                       ▼            ▼           ▼           ▼            
-                  Panel web     Telegram      Blynk     ThingSpeak
-                 (gráficas +    (comandos y
-                  actitud 3D)    alertas)
+                         ┌──────────────┬───────┴──────┬──────────────┐
+                         ▼              ▼              ▼              ▼
+                     Panel web       Telegram        Blynk        ThingSpeak
+                   (gráficas +     (comandos y
+                    actitud 3D)      alertas)
 ```
 
-El módulo del globo mide temperatura, humedad, presión, altitud, inclinación, vibración y PM2.5/PM10, y envía un paquete JSON cada 2 s por LoRa. La estación de tierra lo recibe, lo valida y lo reparte a un panel web propio, un bot de Telegram y dos plataformas IoT (Blynk y ThingSpeak).
+El globo envía un paquete JSON cada 2 s. La estación de tierra lo recibe en una tarea de FreeRTOS dedicada (núcleo 0, prioridad alta), lo valida y lo reparte a los demás servicios, que corren en tareas propias en el núcleo 1. Las conexiones TLS (Telegram, Blynk, ThingSpeak) se serializan con un mutex para no agotar la memoria del ESP32.
+
+### Módulos del receptor
+
+| Módulo | Responsabilidad |
+|---|---|
+| `lora_rx` | Recibe y decodifica los paquetes del E220, adjunta el RSSI y cuenta paquetes perdidos por saltos de id. |
+| `telemetria` | Estado compartido entre tareas, protegido con mutex (`telSnapshot()` entrega una copia consistente). |
+| `web_server` + `web_page` | Panel web con Chart.js y Three.js; el modelo 3D se sirve desde `modelo_glb.h` en `/modelo.glb`. |
+| `telegram_bot` | Comandos `/start`, `/datos`, `/estado` y alertas, en su propia tarea. |
+| `nube` | Publica en Blynk y ThingSpeak cada 15 s, una tarea por servicio. |
+| `tls_bloqueo` | Una sola conexión TLS a la vez (RAII sobre un mutex de FreeRTOS). |
+| `registro_pc` | Envía paquetes y errores a la PC por lotes, con colas en RAM, reintentos con espera creciente y descarte controlado. |
+
+## Hardware
+
+| Componente | Función | Interfaz |
+|---|---|---|
+| 2 × ESP32 DevKit | Globo y estación terrestre | — |
+| 2 × EBYTE E220-900T22D | Enlace LoRa 915 MHz | UART 9600 |
+| DHT22 | Temperatura y humedad | 1 hilo |
+| BMP180 | Presión y altitud | I²C |
+| ADXL345 | Aceleración en 3 ejes (±16 g) | I²C |
+| PMS7003M | PM1.0, PM2.5 y PM10 | UART 9600 (modo activo) |
+
+**Conexiones del transmisor (globo)**
+
+| Señal | GPIO |
+|---|---|
+| E220 TX → ESP32 RX | 16 |
+| E220 RX ← ESP32 TX | 17 |
+| E220 AUX | 15 |
+| PMS7003M TX → ESP32 RX | 18 |
+| PMS7003M RX ← ESP32 TX | 19 |
+| DHT22 datos | 4 |
+| I²C SDA / SCL (BMP180, ADXL345) | 21 / 22 |
+
+El receptor usa los mismos pines 16, 17 y 15 para su E220. El esquemático completo está en [`AeroSense.fzz`](AeroSense.fzz) (Fritzing).
 
 ## Estructura del repositorio
 
-| Carpeta | Descripción |
-|---|---|
-| `transmisor/` | Firmware del globo: lee los 4 sensores y transmite por LoRa. |
-| `receptor/` | Estación terrestre: recibe por LoRa, sirve el panel web, atiende Telegram y publica en la nube. Modularizado (ver abajo). |
-| `herramientas/configurar_e220_rssi/` | Sketch de un solo uso para activar el byte de RSSI en el módulo E220. |
-| `herramientas/servidor_registro/` | Servidor en Python (sin dependencias) que guarda en SQLite lo que manda el receptor: tabla `registros` y tabla `errores`, con visor web y exportación a CSV. |
-| `herramientas/modelo_3d/` | Script en Python que genera el modelo 3D del módulo (`.glb`) y `receptor/include/modelo_glb.h`. |
-
-Cada carpeta es un proyecto independiente de PlatformIO.
-
-## Receptor: módulos
-
-| Archivo | Responsabilidad |
-|---|---|
-| `lora_rx` | Recibe y decodifica los paquetes del E220 en una tarea de FreeRTOS propia, para no perder paquetes si otra tarea se bloquea. |
-| `telemetria` | Estado compartido entre tareas, protegido con mutex (`telSnapshot()` da una copia consistente). |
-| `web_server` + `web_page` | Panel web con gráficas (Chart.js) y el modelo 3D del módulo (Three.js) que se inclina según el acelerómetro. El modelo lo sirve el ESP32 en `/modelo.glb` desde `modelo_glb.h`. |
-| `telegram_bot` | Comandos (`/start`, `/datos`, `/estado`) y alertas (sin señal, PM2.5 alto, RSSI bajo), en su propia tarea. |
-| `nube` | Publica en Blynk y ThingSpeak cada 15 s, una tarea por servicio. |
-| `tls_bloqueo` | Permite una sola conexión TLS a la vez (Telegram, Blynk, ThingSpeak) para no agotar la memoria. |
-| `registro_pc` | Manda cada paquete y cada error a la PC por HTTP. Usa colas en RAM: si la PC no responde, espera y reenvía. |
-
-## Enlace LoRa
-
-Los dos módulos E220-900T22D usan el mismo canal y dirección. El RSSI del enlace se activa por configuración (ver `herramientas/configurar_e220_rssi/`) y viaja como un byte extra al final de cada paquete recibido.
+```
+AeroSense/
+├── transmisor/                  Firmware del globo (PlatformIO)
+├── receptor/                    Firmware de la estación terrestre (PlatformIO)
+│   ├── include/secrets.h.example
+│   └── src/                     lora_rx, telemetria, web_server, telegram_bot, nube, tls_bloqueo, registro_pc
+├── herramientas/
+│   ├── servidor_registro/       Servidor Python + SQLite con visor web
+│   ├── configurar_e220_rssi/    Sketch de un solo uso que activa el byte de RSSI del E220
+│   └── modelo_3d/               Genera el modelo 3D (.glb) y receptor/include/modelo_glb.h
+├── docs/                        Imágenes del README
+└── AeroSense.fzz                Esquemático (Fritzing)
+```
 
 ## Puesta en marcha
 
-### 1. Credenciales (receptor)
+### 1. Requisitos
 
-```
+- [VS Code](https://code.visualstudio.com/) con la extensión [PlatformIO](https://platformio.org/).
+- Python 3.8 o superior en la PC (solo para el registro en SQLite).
+
+### 2. Configurar el E220 (una sola vez)
+
+Sube `herramientas/configurar_e220_rssi/` al ESP32 de tierra para activar el byte de RSSI. Ambos módulos deben usar el mismo canal y dirección.
+
+### 3. Credenciales del receptor
+
+```bash
 cd receptor/include
 cp secrets.h.example secrets.h
 ```
 
-Completa en `secrets.h`:
-
-| Variable | Para qué |
+| Variable | Uso |
 |---|---|
 | `WIFI_SSID`, `WIFI_PASSWORD` | Red del receptor |
 | `BOT_TOKEN`, `CHAT_ID` | Bot de Telegram |
-| `BLYNK_AUTH_TOKEN` | Auth Token de la plantilla en Blynk (vacío = desactivado) |
-| `THINGSPEAK_API_KEY` | Write API Key del canal en ThingSpeak (vacío = desactivado) |
+| `BLYNK_AUTH_TOKEN` | Auth Token de la plantilla de Blynk (vacío = desactivado) |
+| `THINGSPEAK_API_KEY` | Write API Key del canal (vacío = desactivado) |
+| `REGISTRO_PC_HOST`, `REGISTRO_PC_PUERTO` | Opcional: IP y puerto de la PC (por defecto `192.168.137.1:8000`) |
 
 `secrets.h` está en `.gitignore` y nunca se sube al repositorio.
 
-### 2. Compilar y subir
+### 4. Compilar y subir
 
-Con PlatformIO, compila y sube `transmisor/` al ESP32 del globo y `receptor/` al ESP32 de tierra.
+Abre cada carpeta en PlatformIO y sube `transmisor/` al ESP32 del globo y `receptor/` al de tierra. Revisa `upload_port` en cada `platformio.ini`.
 
-### 3. Usar
+| Entorno del receptor | Uso |
+|---|---|
+| `esp32dev` | Firmware completo |
+| `diagnostico` | Sin Telegram ni nube: aísla problemas del enlace LoRa |
 
-- **Panel web:** entra a la IP que imprime el receptor por Serial al conectarse al Wi-Fi.
+El monitor serie guarda una copia con hora de cada línea en `receptor/logs/` (filtro `log2file`).
+
+### 5. Usar
+
+- **Panel web:** la IP que imprime el receptor al conectarse al Wi-Fi.
 - **Telegram:** `/start`, `/datos`, `/estado`.
-- **Blynk / ThingSpeak:** configura la plantilla/canal con los campos descritos en `nube.cpp` antes de la primera ejecución.
+- **Blynk / ThingSpeak:** crea los datastreams y campos de la tabla siguiente.
+
+| Variable | Blynk | ThingSpeak |
+|---|---|---|
+| ID de paquete | V0 | — |
+| Altitud | V1 | Field 1 |
+| Temperatura | V2 | Field 2 |
+| Humedad | V3 | Field 3 |
+| Presión | V4 | Field 4 |
+| PM1.0 | V5 | Field 5 |
+| PM2.5 | V6 | Field 6 |
+| PM10 | V7 | Field 7 |
+| RSSI | V8 | Field 8 |
+
+## Formato del paquete
+
+Una línea JSON por paquete, terminada en `\n`:
+
+```json
+{"id":5407,"alt":883.8,"pres":911.6,"temp":32.3,"hum":40,
+ "pm":{"pm1":22,"pm25":32,"pm10":35},
+ "acc":{"x":-0.04,"y":-0.39,"z":9.96}}
+```
+
+| Campo | Unidad | Nota |
+|---|---|---|
+| `id` | — | Contador; vuelve a 0 al reiniciar el transmisor |
+| `alt` | m | Altitud barométrica con referencia de 1013.25 hPa |
+| `pres` | hPa | |
+| `temp`, `hum` | °C, % | `0` y `0` indican que falló la lectura del DHT22 |
+| `pm.*` | µg/m³ | `null` mientras el PMS7003M no tenga una lectura reciente (por ejemplo, en los 30 s de arranque del ventilador) |
+| `acc.*` | m/s² | |
+
+El E220 agrega un byte de RSSI después del salto de línea; el receptor lo convierte a dBm.
 
 ## Registro en la PC
 
-La estación de tierra puede guardar todo el historial en tu computadora (SQLite, dos tablas: `registros` y `errores`).
+```bash
+python herramientas/servidor_registro/servidor.py      # o doble clic en iniciar_servidor.bat
+```
 
-1. En la PC: `python herramientas/servidor_registro/servidor.py` (o doble clic en `iniciar_servidor.bat`). Solo requiere Python 3.8+.
-2. La ESP32 receptora debe estar en la misma red que la PC. Con el hotspot de Windows la PC es `192.168.137.1` (valor por defecto); para otra red, define `REGISTRO_PC_HOST` en `secrets.h`.
-3. Abre `http://localhost:8000` para ver el enlace por sesión, los errores y los últimos registros. `/exportar/registros.csv` y `/exportar/errores.csv` descargan todo.
+Abre `http://localhost:8000` para ver el enlace por sesión, los errores por tipo y los últimos registros. `/exportar/registros.csv` y `/exportar/errores.csv` descargan todo. Si el firewall de Windows pregunta, permite Python en redes privadas.
 
-La columna `sesion` sube cada vez que el transmisor reinicia (su id vuelve a 0). Hay tres tipos de falta que no hay que mezclar: `paquetes_perdidos` (los cuenta el receptor: nunca llegaron por LoRa), `registros_descartados` (el receptor sí los recibió, pero la PC no alcanzó a recibirlos y se saturó su cola) y `huecos_en_registros` (los ve el servidor por los saltos de id: suma de las dos anteriores). Los envíos van por lotes y un reintento nunca duplica registros. Si el firewall de Windows pregunta, permite Python en redes privadas.
+La base tiene dos tablas:
 
-El monitor serie del receptor guarda una copia con hora de cada línea en `receptor/platformio-device-monitor-*.log` (filtro `log2file`), porque la terminal de VS Code solo conserva las últimas líneas.
+- **`registros`:** un renglón por paquete, con la hora real de llegada al receptor y el RSSI. La columna `sesion` sube cada vez que el transmisor se reinicia.
+- **`errores`:** eventos con origen, tipo, detalle y cantidad.
 
-## Datastreams / campos en la nube
+Hay tres tipos de faltante que conviene no mezclar:
 
-| # | Blynk (V) | ThingSpeak (Field) |
+| Tipo | Quién lo detecta | Significado |
 |---|---|---|
-| Altitud | V1 | 1 |
-| Temperatura | V2 | 2 |
-| Humedad | V3 | 3 |
-| Presión | V4 | 4 |
-| PM1.0 | V5 | 5 |
-| PM2.5 | V6 | 6 |
-| PM10 | V7 | 7 |
-| RSSI | V8 | 8 |
-| ID de paquete | V0 | — |
+| `paquetes_perdidos` | Receptor | El paquete nunca llegó por LoRa. |
+| `registros_descartados` | Receptor | Llegó por LoRa, pero la PC no lo recibió a tiempo y se descartó de la cola. |
+| `huecos_en_registros` | Servidor | Ids que faltan en la base; suma de los dos anteriores. |
 
-## Créditos y licencia
+Los envíos van por lotes y son idempotentes: un reintento nunca duplica registros ni errores. Al actualizar el servidor, la base se migra sola y antes se guarda una copia `registros.db.antes-vN.respaldo`.
 
-Proyecto académico de código abierto, reutilizable para fines educativos. Ver el reporte del proyecto para la justificación técnica, el cálculo de sustentación y las pruebas completas.
+## Resultados de las pruebas
+
+Prueba de laboratorio del 24 de noviembre de 2026, con todos los servicios activos:
+
+| Métrica | Resultado |
+|---|---|
+| Duración | 3 h 10 min |
+| Paquetes transmitidos | 5503 |
+| Paquetes perdidos por radio | **0 (0 %)** |
+| RSSI (mediana, 80 % de los paquetes) | −57 dBm (−63 a −49 dBm) |
+| Registros guardados en la PC | 5480 (99.6 %) |
+
+Los 23 registros que faltaron en la PC se debieron al manejo de reintentos del servidor, corregido después de esta prueba (ver la siguiente sección).
+
+## Problemas conocidos y soluciones
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| Cortes de señal LoRa | Jumper flojo en el receptor | Revisar conexiones del E220 |
+| `SSL - Memory allocation failed` en Blynk | Varias conexiones TLS al mismo tiempo | `tls_bloqueo`: una sola conexión TLS a la vez |
+| Envíos a la PC de 3 a 9 s y lotes atorados | Retransmisiones TCP y un reintento que el servidor no reconocía | Petición HTTP en una sola escritura, Wi-Fi sin ahorro de energía y servidor idempotente |
+| PM en 0 casi siempre, con un valor real cada 32 paquetes | El transmisor leía un solo byte del PMS7003M por envío (una trama mide 32 bytes) | Vaciar el búfer UART en cada vuelta del `loop()` y mandar `null` sin lectura; el servidor convierte los 0 antiguos en vacíos |
+| Advertencias `deprecated` de ArduinoJson | La librería UniversalTelegramBot usa la API anterior | Silenciadas con `-Wno-deprecated-declarations`; no afectan el funcionamiento |
+
+## Equipo
+
+- Mastache De la Paz David
+- Ramírez Díaz Salvador
+- Sánchez Julián Isaac
+
+Proyecto académico para la materia de Arquitectura de Computadoras, Instituto Tecnológico de Zacatepec (TecNM). Uso libre con fines educativos. El reporte del proyecto contiene la justificación técnica, el cálculo de sustentación y las pruebas completas.

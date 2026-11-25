@@ -55,7 +55,7 @@ TIPO_RADIO = "paquetes_perdidos"        # el receptor vio saltar el id: el paque
 TIPO_COLA = "registros_descartados"     # el receptor los recibió pero no pudo mandarlos a la PC a tiempo
 TIPO_HUECO = "huecos_en_registros"      # el servidor ve ids que faltan (radio + cola)
 LENTA_S = 0.5                           # una petición que tarde más se anota en la consola
-VERSION_BASE = 2                        # PRAGMA user_version: sube con cada migración
+VERSION_BASE = 3                        # PRAGMA user_version: sube con cada migración
 VENTANA_ERROR_S = 30                    # un error idéntico dentro de esta ventana es un reintento
 
 
@@ -99,7 +99,7 @@ class Almacen:
         version = self._con.execute("PRAGMA user_version").fetchone()[0]
         if version >= VERSION_BASE:
             return
-        if self._con.execute("SELECT COUNT(*) FROM errores").fetchone()[0] > 0:
+        if self._con.execute("SELECT (SELECT COUNT(*) FROM errores) + (SELECT COUNT(*) FROM registros)").fetchone()[0] > 0:
             ruta_copia = f"{self._ruta}.antes-v{VERSION_BASE}.respaldo"
             copia = sqlite3.connect(ruta_copia)  # la base original queda intacta por si algo sale mal
             self._con.backup(copia)
@@ -120,7 +120,7 @@ class Almacen:
         # v2: un lote atorado se reintentaba y sus errores se guardaban otra vez en cada intento.
         # Se quitan las copias (mismo error, mismo detalle, segundos de diferencia). Los descartes
         # de la primera versión no traían detalle propio, así que esos no se tocan.
-        quitados = self._con.execute(
+        quitados = 0 if version >= 2 else self._con.execute(
             "DELETE FROM errores WHERE tipo <> ? AND id IN ("
             " SELECT b.id FROM errores a JOIN errores b"
             "  ON b.id > a.id AND b.origen = a.origen AND b.tipo = a.tipo"
@@ -129,6 +129,16 @@ class Almacen:
             (TIPO_COLA, VENTANA_ERROR_S)).rowcount
         if quitados:
             print(f"  Se quitaron {quitados} errores repetidos por reintentos")
+
+        # v3: el firmware del transmisor hasta el 24/11/2026 mandaba 0 en las tres lecturas de PM
+        # cuando el PMS7003M aún no completaba una trama (leía 1 byte por envío). Ese 0 no es una
+        # medición: se cambia a vacío (NULL), igual que lo manda ahora el transmisor corregido.
+        if version < 3:
+            vaciados = self._con.execute(
+                "UPDATE registros SET pm1 = NULL, pm25 = NULL, pm10 = NULL"
+                " WHERE pm1 = 0 AND pm25 = 0 AND pm10 = 0").rowcount
+            if vaciados:
+                print(f"  {vaciados} registros con PM en 0 (sin lectura del sensor) quedaron vacios")
 
         self._con.execute(f"PRAGMA user_version = {VERSION_BASE}")
         self._con.commit()

@@ -1,0 +1,8 @@
+# Finales de línea: los .bat necesitan CRLF en Windows
+*.bat text eol=crlf
+
+# Binarios
+*.png binary
+*.glb binary
+*.fzz binary
+*.db binary
