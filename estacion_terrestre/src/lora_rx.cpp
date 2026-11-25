@@ -132,6 +132,8 @@ static void procesarPaquete(const String &linea)
   paquete.id = doc["id"];
   paquete.alt = doc["alt"];
   paquete.pres = doc["pres"];
+  paquete.alturaValida = !doc["h"].isNull();
+  paquete.altura = doc["h"] | 0.0f;
   paquete.temp = doc["temp"];
   paquete.hum = doc["hum"];
   paquete.pmValido = !pm["pm1"].isNull() && !pm["pm25"].isNull() && !pm["pm10"].isNull();

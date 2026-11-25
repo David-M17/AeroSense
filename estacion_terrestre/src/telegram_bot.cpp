@@ -138,7 +138,9 @@ static void responderDatos(const String &chatId)
 
   String m = "📊 *Datos más recientes (Globo amarrado)*\n";
   m += "📦 ID Paquete: " + String(t.id) + "\n";
-  m += "🏔️ Altitud: " + String(t.alt, 1) + " m\n";
+  if (t.alturaValida)
+    m += "🎈 Altura sobre el suelo: " + String(t.altura, 1) + " m\n";
+  m += "🏔️ Altitud: " + String(t.alt, 1) + " msnm\n";
   m += "🌡️ Temperatura: " + String(t.temp, 1) + " °C\n";
   m += "💧 Humedad: " + String(t.hum) + " %\n";
   if (t.pmValido)

@@ -45,6 +45,25 @@ bool pmValido = false;
 unsigned long ultimaTramaPms = 0;
 const unsigned long PMS_CADUCIDAD_MS = 10000; // lectura "vieja" tras 10 s sin tramas
 
+// --- Presión y altura ---
+// Una sola lectura del BMP180 varía ±0.1 hPa (cerca de ±1 m). Se toma una muestra cada 100 ms y
+// se promedian todas las del intervalo entre envíos (~20); el promedio además pasa por un filtro
+// exponencial. Durante los primeros segundos tras encender se mide la presión del suelo: la
+// "altura" que se envía es la diferencia respecto a ese punto. Hay que encender el módulo en el
+// suelo y dejarlo quieto mientras calibra.
+const unsigned long MUESTREO_BARO_MS = 100;
+const unsigned long CALIBRACION_MS = 10000;
+const float ALFA_FILTRO = 0.4; // 1 = sin filtro; más bajo = más suave pero más lento
+const float PRESION_NIVEL_MAR_HPA = 1013.25;
+bool bmpOk = false;
+unsigned long ultimaMuestraBaro = 0;
+float sumaPresion = 0; // muestras desde el último envío
+unsigned int nMuestras = 0;
+float presionFiltrada = NAN; // hPa
+float presionSuelo = NAN;    // hPa; NAN mientras calibra
+float sumaCalibracion = 0;
+unsigned int nCalibracion = 0;
+
 // Control de tiempos de transmisión (sin delay() para no perder tramas del PMS)
 unsigned long ultimoEnvio = 0;
 const unsigned long INTERVALO_ENVIO_MS = 2000;
@@ -62,6 +81,45 @@ void leerPms()
       pmValido = true;
     }
   }
+}
+
+void muestrearBarometro()
+{
+  if (!bmpOk || millis() - ultimaMuestraBaro < MUESTREO_BARO_MS)
+    return;
+  ultimaMuestraBaro = millis();
+
+  const float p = bmp.readPressure() / 100.0; // Pa -> hPa
+  sumaPresion += p;
+  nMuestras++;
+
+  if (isnan(presionSuelo))
+  {
+    sumaCalibracion += p;
+    nCalibracion++;
+    if (millis() >= CALIBRACION_MS)
+    {
+      presionSuelo = sumaCalibracion / nCalibracion;
+      Serial.printf("Referencia del suelo: %.2f hPa (%u muestras)\n", presionSuelo, nCalibracion);
+    }
+  }
+}
+
+// Cierra el intervalo entre envíos: promedia sus muestras y actualiza el filtro.
+void actualizarPresion()
+{
+  if (nMuestras == 0)
+    return;
+  const float promedio = sumaPresion / nMuestras;
+  sumaPresion = 0;
+  nMuestras = 0;
+  presionFiltrada = isnan(presionFiltrada) ? promedio : presionFiltrada + ALFA_FILTRO * (promedio - presionFiltrada);
+}
+
+// Fórmula barométrica internacional: altura entre una presión de referencia y la actual.
+float alturaDesde(float presionRef, float presion)
+{
+  return 44330.0 * (1.0 - pow(presion / presionRef, 0.1903));
 }
 
 void setup()
@@ -88,7 +146,9 @@ void setup()
   }
   else
   {
+    bmpOk = true;
     Serial.println("BMP180 inicializado correctamente.");
+    Serial.println("Calibrando la altura del suelo: deja el modulo quieto 10 s...");
   }
 
   // Inicialización del acelerómetro ADXL345
@@ -110,6 +170,7 @@ void loop()
 {
   // 1. Vaciar siempre el buffer del PMS7003M (no bloquear el loop)
   leerPms();
+  muestrearBarometro();
 
   // 2. Transmitir cada INTERVALO_ENVIO_MS y solo si el módulo LoRa está libre (AUX en HIGH)
   if (millis() - ultimoEnvio < INTERVALO_ENVIO_MS || digitalRead(LORA_AUX) == LOW)
@@ -122,9 +183,10 @@ void loop()
   float temp = dht.readTemperature();
   float hum = dht.readHumidity();
 
-  // Lecturas barométricas
-  float pres = bmp.readPressure() / 100.0; // Convertir Pa a hPa (millibares)
-  float alt = bmp.readAltitude(101325);    // Altitud estimada con referencia Estándar (1013.25 hPa)
+  // Lecturas barométricas (promediadas y filtradas)
+  actualizarPresion();
+  const float pres = presionFiltrada;
+  const float alt = alturaDesde(PRESION_NIVEL_MAR_HPA, pres); // msnm, con la atmósfera estándar
 
   // Manejo del error de lectura del DHT22
   if (isnan(temp) || isnan(hum))
@@ -144,7 +206,11 @@ void loop()
   JsonDocument doc;
   doc["id"] = packetId++;
   doc["alt"] = round(alt * 10.0) / 10.0;
-  doc["pres"] = round(pres * 10.0) / 10.0;
+  doc["pres"] = round(pres * 100.0) / 100.0;
+  if (isnan(presionSuelo))
+    doc["h"] = nullptr; // aún calibrando
+  else
+    doc["h"] = round(alturaDesde(presionSuelo, pres) * 10.0) / 10.0; // altura sobre el suelo (m)
   doc["temp"] = round(temp * 10.0) / 10.0;
   doc["hum"] = (int)hum;
 

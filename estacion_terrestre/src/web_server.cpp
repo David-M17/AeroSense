@@ -30,6 +30,10 @@ static void handleData()
   {
     doc["id"] = tel.id;
     doc["alt"] = tel.alt;
+    if (tel.alturaValida)
+      doc["h"] = tel.altura;
+    else
+      doc["h"] = nullptr;
     doc["pres"] = tel.pres;
     doc["temp"] = tel.temp;
     doc["hum"] = tel.hum;

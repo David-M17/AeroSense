@@ -37,6 +37,7 @@ Arquitectura de Computadoras · Instituto Tecnológico de Zacatepec (TecNM)
 
 ## Características
 
+- **Altura sobre el suelo:** al encender, el módulo toma 10 s la presión del suelo como referencia y desde ahí calcula cuánto se ha elevado; las lecturas se promedian y filtran para quitar el ruido del sensor.
 - **Sensado:** temperatura y humedad (DHT22), presión y altitud (BMP180), actitud y vibración (ADXL345), material particulado PM1.0 / PM2.5 / PM10 (PMS7003M).
 - **Enlace LoRa** E220-900T22D a 915 MHz con RSSI por paquete y conteo de paquetes perdidos.
 - **Estación terrestre multitarea** con FreeRTOS: la recepción por radio nunca se bloquea por Wi-Fi o TLS.
@@ -183,7 +184,7 @@ El monitor serie guarda una copia con hora de cada línea en `estacion_terrestre
 Una línea JSON por paquete, terminada en `\n`:
 
 ```json
-{"id":5407,"alt":883.8,"pres":911.6,"temp":32.3,"hum":40,
+{"id":5407,"alt":883.8,"pres":911.62,"h":12.4,"temp":32.3,"hum":40,
  "pm":{"pm1":22,"pm25":32,"pm10":35},
  "acc":{"x":-0.04,"y":-0.39,"z":9.96}}
 ```
@@ -192,7 +193,8 @@ Una línea JSON por paquete, terminada en `\n`:
 |---|---|---|
 | `id` | — | Contador; vuelve a 0 al reiniciar el transmisor |
 | `alt` | m | Altitud barométrica con referencia de 1013.25 hPa |
-| `pres` | hPa | |
+| `pres` | hPa | Promedio de ~20 lecturas del BMP180 con filtro exponencial |
+| `h` | m | Altura sobre el suelo; `null` durante los 10 s de calibración al encender |
 | `temp`, `hum` | °C, % | `0` y `0` indican que falló la lectura del DHT22 |
 | `pm.*` | µg/m³ | `null` mientras el PMS7003M no tenga una lectura reciente (por ejemplo, en los 30 s de arranque del ventilador) |
 | `acc.*` | m/s² | |
@@ -252,6 +254,7 @@ Los 23 registros que faltaron en la PC se debieron al manejo de reintentos del s
 |---|---|
 | **ADXL345** | Acelerómetro de 3 ejes; con él se calcula la inclinación del módulo y se detectan vibraciones. |
 | **Altitud barométrica** | Altura estimada a partir de la presión del aire; cambia con el clima, por eso es relativa. |
+| **Altura sobre el suelo** | Diferencia de altitud entre la posición actual y el punto donde se encendió el módulo. |
 | **AUX** | Pin del módulo E220 que indica si está ocupado transmitiendo; el firmware espera a que esté libre. |
 | **BMP180** | Sensor de presión atmosférica y temperatura, conectado por I²C. |
 | **Blynk / ThingSpeak** | Plataformas IoT en la nube para ver los datos en gráficas desde cualquier lugar. |
@@ -260,6 +263,7 @@ Los 23 registros que faltaron en la PC se debieron al manejo de reintentos del s
 | **DHT22** | Sensor digital de temperatura y humedad relativa. |
 | **E220-900T22D** | Módulo de radio LoRa de EBYTE que se controla por UART como si fuera un cable serie. |
 | **ESP32** | Microcontrolador de doble núcleo con Wi-Fi y Bluetooth integrados. |
+| **Filtro exponencial** | Promedio que da más peso a las lecturas recientes; suaviza el ruido sin retrasar mucho la medición. |
 | **FreeRTOS** | Sistema operativo de tiempo real del ESP32; permite repartir el trabajo en tareas que corren en paralelo. |
 | **Globo cautivo** | Globo amarrado al suelo con una cuerda, que no vuela libre. |
 | **I²C** | Bus de dos hilos (SDA y SCL) que comparten varios sensores. |

@@ -122,9 +122,9 @@ canvas { max-height: 170px; }
   <!-- Cifras principales -->
   <div class="rejilla" style="margin-bottom:14px">
     <div class="tarjeta">
-      <p class="titulo">Altitud</p>
-      <div class="cifra"><span id="palt">--</span><small>m</small></div>
-      <div class="sub">Presión <b id="ppres">--</b> hPa</div>
+      <p class="titulo">Altura sobre el suelo</p>
+      <div class="cifra"><span id="ph">--</span><small>m</small></div>
+      <div class="sub">Altitud <b id="palt">--</b> msnm · Presión <b id="ppres">--</b> hPa</div>
     </div>
     <div class="tarjeta">
       <p class="titulo">Temperatura</p>
@@ -171,7 +171,7 @@ canvas { max-height: 170px; }
   </div>
 
   <div class="rejilla">
-    <div class="tarjeta"><p class="titulo">Altitud (m)</p><canvas id="altChart"></canvas></div>
+    <div class="tarjeta"><p class="titulo">Altura sobre el suelo (m)</p><canvas id="altChart"></canvas></div>
     <div class="tarjeta"><p class="titulo">Temperatura (°C) y humedad (%)</p><canvas id="envChart"></canvas></div>
     <div class="tarjeta"><p class="titulo">RSSI (dBm)</p><canvas id="rssiChart"></canvas></div>
 
@@ -274,11 +274,11 @@ var opciones = {
   }
 };
 
-function nuevaGrafica(id, conjuntos) {
+function nuevaGrafica(id, conjuntos, opcionesPropias) {
   return new Chart($(id).getContext("2d"), {
     type: "line",
     data: { labels: [], datasets: conjuntos },
-    options: opciones
+    options: opcionesPropias || opciones
   });
 }
 
@@ -290,7 +290,14 @@ function linea(etiqueta, color, relleno) {
   };
 }
 
-var altChart = nuevaGrafica("altChart", [linea("Altitud (m)", "#00d4ff", true)]);
+// Escala mínima de 4 m en la altura: si no, Chart.js la amplía hasta que el ruido de unos
+// centímetros parece un movimiento real.
+var opcionesAltura = JSON.parse(JSON.stringify(opciones));
+opcionesAltura.scales.y.afterDataLimits = function (eje) {
+  var centro = (eje.max + eje.min) / 2;
+  if (isFinite(centro) && eje.max - eje.min < 4) { eje.min = centro - 2; eje.max = centro + 2; }
+};
+var altChart = nuevaGrafica("altChart", [linea("Altura (m)", "#00d4ff", true)], opcionesAltura);
 var envChart = nuevaGrafica("envChart", [linea("Temp (°C)", "#ffb020"), linea("Humedad (%)", "#00bcd4")]);
 var pmChart = nuevaGrafica("pmChart", [linea("PM2.5", "#e91e63"), linea("PM10", "#9c27b0")]);
 var rssiChart = nuevaGrafica("rssiChart", [linea("RSSI (dBm)", "#2ecc71", true)]);
@@ -317,6 +324,7 @@ function pintarDatos(d) {
   pintarActitud(d.acc);
 
   texto("pid", d.id);
+  texto("ph", d.h, 1);
   texto("palt", d.alt, 1);
   texto("ppres", d.pres, 1);
   texto("ptemp", d.temp, 1);
@@ -331,7 +339,7 @@ function pintarDatos(d) {
   ultimoIdGraficado = d.id;
 
   var hora = new Date().toLocaleTimeString();
-  agregar(altChart, hora, [d.alt]);
+  agregar(altChart, hora, [hayValor(d.h) ? d.h : null]); // vacío mientras el globo calibra
   agregar(envChart, hora, [d.temp, d.hum]);
   agregar(pmChart, hora, [pm.pm25, pm.pm10]);
   agregar(rssiChart, hora, [d.rssi]);

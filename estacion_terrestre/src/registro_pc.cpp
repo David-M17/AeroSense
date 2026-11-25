@@ -36,6 +36,8 @@ struct PaqueteCola
   unsigned long ts; // millis() en que llegó
   unsigned int id;
   float alt, pres, temp;
+  bool alturaValida;
+  float altura;
   int hum;
   bool pmValido;
   int pm1, pm25, pm10;
@@ -110,7 +112,7 @@ void registroPcPaquete(const Telemetria &t, bool tieneRssi, int rssiDbm)
   if (colaPaquetes == nullptr)
     return;
 
-  PaqueteCola p = {millis(), t.id, t.alt, t.pres, t.temp, t.hum, t.pmValido, t.pm1, t.pm25, t.pm10,
+  PaqueteCola p = {millis(), t.id, t.alt, t.pres, t.temp, t.alturaValida, t.altura, t.hum, t.pmValido, t.pm1, t.pm25, t.pm10,
                    t.accX, t.accY, t.accZ, tieneRssi, rssiDbm};
   if (!encolar(colaPaquetes, &p))
     paquetesDescartados++;
@@ -231,6 +233,8 @@ static int enviarLote(const Lote &lote)
     o["id"] = p.id;
     o["alt"] = p.alt;
     o["pres"] = p.pres;
+    if (p.alturaValida)
+      o["h"] = p.altura;
     o["temp"] = p.temp;
     o["hum"] = p.hum;
     if (p.pmValido)

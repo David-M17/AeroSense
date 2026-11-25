@@ -6,6 +6,8 @@ struct Telemetria
 {
   unsigned int id = 0;
   float alt = 0.0, pres = 0.0, temp = 0.0;
+  bool alturaValida = false; // false mientras el globo calibra la referencia del suelo
+  float altura = 0.0;        // m sobre el punto donde se encendió el módulo
   int hum = 0;
 
   bool pmValido = false; // false = el transmisor no tiene lectura reciente del PMS7003M

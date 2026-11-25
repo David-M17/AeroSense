@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS registros (
   pm1 INTEGER, pm25 INTEGER, pm10 INTEGER,  -- NULL si el PMS7003M no tenía lectura
   acc_x REAL, acc_y REAL, acc_z REAL,
   rssi_dbm     INTEGER,
+  altura       REAL,               -- m sobre el suelo (referencia que toma el globo al encender)
   UNIQUE (sesion, id_paquete)      -- un reintento no duplica el registro
 );
 CREATE TABLE IF NOT EXISTS errores (
@@ -55,7 +56,7 @@ TIPO_RADIO = "paquetes_perdidos"        # el receptor vio saltar el id: el paque
 TIPO_COLA = "registros_descartados"     # el receptor los recibió pero no pudo mandarlos a la PC a tiempo
 TIPO_HUECO = "huecos_en_registros"      # el servidor ve ids que faltan (radio + cola)
 LENTA_S = 0.5                           # una petición que tarde más se anota en la consola
-VERSION_BASE = 3                        # PRAGMA user_version: sube con cada migración
+VERSION_BASE = 4                        # PRAGMA user_version: sube con cada migración
 VENTANA_ERROR_S = 30                    # un error idéntico dentro de esta ventana es un reintento
 
 
@@ -140,6 +141,10 @@ class Almacen:
             if vaciados:
                 print(f"  {vaciados} registros con PM en 0 (sin lectura del sensor) quedaron vacios")
 
+        # v4: columna de altura sobre el suelo
+        if "altura" not in [c["name"] for c in self._con.execute("PRAGMA table_info(registros)")]:
+            self._con.execute("ALTER TABLE registros ADD COLUMN altura REAL")
+
         self._con.execute(f"PRAGMA user_version = {VERSION_BASE}")
         self._con.commit()
 
@@ -203,10 +208,10 @@ class Almacen:
 
         self._con.execute(
             "INSERT INTO registros (recibido_en, sesion, id_paquete, alt, pres, temp, hum,"
-            " pm1, pm25, pm10, acc_x, acc_y, acc_z, rssi_dbm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " pm1, pm25, pm10, acc_x, acc_y, acc_z, rssi_dbm, altura) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (hora, sesion, id_paquete, d.get("alt"), d.get("pres"), temp, hum,
              pm.get("pm1"), pm.get("pm25"), pm.get("pm10"),
-             acc.get("x"), acc.get("y"), acc.get("z"), d.get("rssi")))
+             acc.get("x"), acc.get("y"), acc.get("z"), d.get("rssi"), d.get("h")))
 
         if sesion == self._sesion and self._ultimo_id is not None and id_paquete > self._ultimo_id + 1:
             faltan = id_paquete - self._ultimo_id - 1
@@ -292,7 +297,7 @@ async function cargar(){
  document.getElementById('tot').innerHTML='Perdidos de verdad por el radio (los cuenta el receptor): <b>'+s.totales.perdidos_radio+
   '</b> · Descartados por el receptor porque la PC no alcanzó a recibirlos: <b>'+s.totales.descartados_cola+'</b><br><small>«Faltan» suma las dos causas.</small>';
  tabla('err',[['Origen','origen',1],['Tipo','tipo',1],['Veces','veces'],['Cantidad','cantidad'],['Última vez','ultimo',1]],s.errores);
- tabla('reg',[['Hora','recibido_en',1],['Ses','sesion'],['Id','id_paquete'],['Alt m','alt',0,0,1],['hPa','pres',0,0,1],['°C','temp',0,0,1],
+ tabla('reg',[['Hora','recibido_en',1],['Ses','sesion'],['Id','id_paquete'],['Altura m','altura',0,0,1],['Alt msnm','alt',0,0,1],['hPa','pres',0,0,1],['°C','temp',0,0,1],
   ['%HR','hum'],['PM1','pm1'],['PM2.5','pm25'],['PM10','pm10'],['ax','acc_x',0,0,2],['ay','acc_y',0,0,2],['az','acc_z',0,0,2],['RSSI','rssi_dbm']],r);
  tabla('ult',[['Hora','ocurrido_en',1],['Origen','origen',1],['Tipo','tipo',1],['Cant.','cantidad'],['Detalle','detalle',1]],e);
 }
