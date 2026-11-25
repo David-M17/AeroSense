@@ -8,8 +8,8 @@
 
 // Definición de pines UART
 // Serial1: Sensor de partículas PMS7003M
-#define PMS_RX 18  // Conectar al TX del sensor PMS7003M
-#define PMS_TX 19  // Conectar al RX del sensor PMS7003M
+#define PMS_RX 18 // Conectar al TX del sensor PMS7003M
+#define PMS_TX 19 // Conectar al RX del sensor PMS7003M
 
 // Serial2: Módulo LoRa E220
 #define LORA_RX 16 // Conectar al TX del LoRa E220
@@ -64,7 +64,8 @@ void leerPms()
   }
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   delay(1000);
 
@@ -81,22 +82,28 @@ void setup() {
   dht.begin();
 
   // Inicialización del sensor BMP180
-  if (!bmp.begin()) {
-    Serial.println("⚠️ ERROR: No se encontró el sensor BMP180 en I2C.");
-  } else {
-    Serial.println("✅ BMP180 inicializado correctamente.");
+  if (!bmp.begin())
+  {
+    Serial.println("ERROR: No se encontró el sensor BMP180 en I2C.");
+  }
+  else
+  {
+    Serial.println("BMP180 inicializado correctamente.");
   }
 
   // Inicialización del acelerómetro ADXL345
-  if (!accel.begin()) {
-    Serial.println("⚠️ ERROR: No se encontró el acelerómetro ADXL345 en I2C.");
-  } else {
+  if (!accel.begin())
+  {
+    Serial.println("ERROR: No se encontró el acelerómetro ADXL345 en I2C.");
+  }
+  else
+  {
     accel.setRange(ADXL345_RANGE_16_G);
-    Serial.println("✅ ADXL345 inicializado correctamente.");
+    Serial.println("ADXL345 inicializado correctamente.");
   }
 
   Serial.println("--- SENSOR PMS7003M EN MODO ACTIVO (UART 9600) ---");
-  Serial.println("🚀 Sistema listo. Comenzando transmisión por LoRa...\n");
+  Serial.println("Sistema listo. Comenzando transmisión por LoRa...\n");
 }
 
 void loop()
