@@ -32,6 +32,7 @@ Arquitectura de Computadoras · Instituto Tecnológico de Zacatepec (TecNM)
 - [Registro en la PC](#registro-en-la-pc)
 - [Resultados de las pruebas](#resultados-de-las-pruebas)
 - [Problemas conocidos y soluciones](#problemas-conocidos-y-soluciones)
+- [Glosario](#glosario)
 - [Equipo](#equipo)
 
 ## Características
@@ -108,14 +109,14 @@ El receptor usa los mismos pines 16, 17 y 15 para su E220. El esquemático compl
 
 ```
 AeroSense/
-├── transmisor/                  Firmware del globo (PlatformIO)
-├── receptor/                    Firmware de la estación terrestre (PlatformIO)
+├── modulo_globo/                Firmware del módulo que vuela en el globo (PlatformIO)
+├── estacion_terrestre/          Firmware de la estación en tierra (PlatformIO)
 │   ├── include/secrets.h.example
 │   └── src/                     lora_rx, telemetria, web_server, telegram_bot, nube, tls_bloqueo, registro_pc
 ├── herramientas/
 │   ├── servidor_registro/       Servidor Python + SQLite con visor web
 │   ├── configurar_e220_rssi/    Sketch de un solo uso que activa el byte de RSSI del E220
-│   └── modelo_3d/               Genera el modelo 3D (.glb) y receptor/include/modelo_glb.h
+│   └── modelo_3d/               Genera el modelo 3D (.glb) y estacion_terrestre/include/modelo_glb.h
 ├── docs/                        Imágenes del README
 └── AeroSense.fzz                Esquemático (Fritzing)
 ```
@@ -134,7 +135,7 @@ Sube `herramientas/configurar_e220_rssi/` al ESP32 de tierra para activar el byt
 ### 3. Credenciales del receptor
 
 ```bash
-cd receptor/include
+cd estacion_terrestre/include
 cp secrets.h.example secrets.h
 ```
 
@@ -150,14 +151,14 @@ cp secrets.h.example secrets.h
 
 ### 4. Compilar y subir
 
-Abre cada carpeta en PlatformIO y sube `transmisor/` al ESP32 del globo y `receptor/` al de tierra. Revisa `upload_port` en cada `platformio.ini`.
+Abre cada carpeta en PlatformIO y sube `modulo_globo/` al ESP32 del globo y `estacion_terrestre/` al de tierra. Revisa `upload_port` en cada `platformio.ini`.
 
 | Entorno del receptor | Uso |
 |---|---|
 | `esp32dev` | Firmware completo |
 | `diagnostico` | Sin Telegram ni nube: aísla problemas del enlace LoRa |
 
-El monitor serie guarda una copia con hora de cada línea en `receptor/logs/` (filtro `log2file`).
+El monitor serie guarda una copia con hora de cada línea en `estacion_terrestre/logs/` (filtro `log2file`).
 
 ### 5. Usar
 
@@ -244,6 +245,43 @@ Los 23 registros que faltaron en la PC se debieron al manejo de reintentos del s
 | Envíos a la PC de 3 a 9 s y lotes atorados | Retransmisiones TCP y un reintento que el servidor no reconocía | Petición HTTP en una sola escritura, Wi-Fi sin ahorro de energía y servidor idempotente |
 | PM en 0 casi siempre, con un valor real cada 32 paquetes | El transmisor leía un solo byte del PMS7003M por envío (una trama mide 32 bytes) | Vaciar el búfer UART en cada vuelta del `loop()` y mandar `null` sin lectura; el servidor convierte los 0 antiguos en vacíos |
 | Advertencias `deprecated` de ArduinoJson | La librería UniversalTelegramBot usa la API anterior | Silenciadas con `-Wno-deprecated-declarations`; no afectan el funcionamiento |
+
+## Glosario
+
+| Término | Significado |
+|---|---|
+| **ADXL345** | Acelerómetro de 3 ejes; con él se calcula la inclinación del módulo y se detectan vibraciones. |
+| **Altitud barométrica** | Altura estimada a partir de la presión del aire; cambia con el clima, por eso es relativa. |
+| **AUX** | Pin del módulo E220 que indica si está ocupado transmitiendo; el firmware espera a que esté libre. |
+| **BMP180** | Sensor de presión atmosférica y temperatura, conectado por I²C. |
+| **Blynk / ThingSpeak** | Plataformas IoT en la nube para ver los datos en gráficas desde cualquier lugar. |
+| **Datastream** | Canal de datos de Blynk (V0, V1…); en ThingSpeak se llama *field*. |
+| **dBm** | Unidad de potencia de señal en escala logarítmica; más cerca de 0 es mejor (−50 dBm es mejor que −100 dBm). |
+| **DHT22** | Sensor digital de temperatura y humedad relativa. |
+| **E220-900T22D** | Módulo de radio LoRa de EBYTE que se controla por UART como si fuera un cable serie. |
+| **ESP32** | Microcontrolador de doble núcleo con Wi-Fi y Bluetooth integrados. |
+| **FreeRTOS** | Sistema operativo de tiempo real del ESP32; permite repartir el trabajo en tareas que corren en paralelo. |
+| **Globo cautivo** | Globo amarrado al suelo con una cuerda, que no vuela libre. |
+| **I²C** | Bus de dos hilos (SDA y SCL) que comparten varios sensores. |
+| **Idempotente** | Que repetir una operación da el mismo resultado que hacerla una vez; aquí, un reenvío no duplica registros. |
+| **JSON** | Formato de texto para datos estructurados (`{"clave": valor}`); es el formato de cada paquete. |
+| **Lote** | Grupo de registros que se envía a la PC en una sola petición HTTP. |
+| **LoRa** | Tecnología de radio de largo alcance y bajo consumo (*Long Range*); aquí opera en 915 MHz. |
+| **Mutex** | Candado que impide que dos tareas usen el mismo recurso al mismo tiempo. |
+| **Núcleo** | Cada uno de los dos procesadores del ESP32; la radio corre en uno y Wi-Fi y nube en el otro. |
+| **Paquete** | Un mensaje de telemetría enviado por el globo cada 2 s. |
+| **Payload** | La carga útil que cuelga del globo: aquí, el módulo con los sensores. |
+| **PlatformIO** | Extensión de VS Code para compilar y subir programas a microcontroladores. |
+| **PM1.0 / PM2.5 / PM10** | Material particulado: partículas suspendidas en el aire menores a 1, 2.5 y 10 micrómetros. |
+| **PMS7003M** | Sensor láser que cuenta partículas en el aire y entrega PM1.0, PM2.5 y PM10. |
+| **RSSI** | Intensidad de la señal recibida (*Received Signal Strength Indicator*), en dBm. |
+| **Sesión** | Periodo entre dos reinicios del módulo del globo; su contador de paquetes vuelve a 0. |
+| **SQLite** | Base de datos que se guarda en un solo archivo, sin instalar un servidor de bases de datos. |
+| **Tarea** | Programa independiente dentro de FreeRTOS, con su propia prioridad y memoria. |
+| **Telemetría** | Medición a distancia: los datos se miden en el globo y se leen en tierra. |
+| **TLS** | Cifrado de las conexiones seguras (HTTPS) a Telegram, Blynk y ThingSpeak; consume mucha memoria. |
+| **UART** | Puerto serie (TX/RX) para comunicar el ESP32 con el E220 y el PMS7003M. |
+| **µg/m³** | Microgramos por metro cúbico: unidad de concentración de partículas en el aire. |
 
 ## Equipo
 

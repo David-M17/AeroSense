@@ -2,7 +2,7 @@
 // conectado al ESP32 del RECEPTOR (mismos pines que el firmware del receptor).
 //
 // Antes de subirla: apaga todo y pon M0 y M1 de ESE módulo en 3V3 (modo configuración).
-// Cuando termine: apaga, regresa M0 y M1 a GND y vuelve a subir el firmware de receptor/.
+// Cuando termine: apaga, regresa M0 y M1 a GND y vuelve a subir el firmware de estacion_terrestre/.
 #include <Arduino.h>
 
 #define LORA_RX 16
@@ -168,7 +168,7 @@ void setup()
 
   Serial.println("\nSiguiente paso:");
   Serial.println("  - Apaga todo, regresa M0 y M1 a GND");
-  Serial.println("  - Vuelve a subir el firmware de la carpeta receptor/");
+  Serial.println("  - Vuelve a subir el firmware de la carpeta estacion_terrestre/");
 }
 
 void loop()

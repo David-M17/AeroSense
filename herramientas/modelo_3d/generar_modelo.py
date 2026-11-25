@@ -2,7 +2,7 @@
 
 Uso (desde la raíz del repo):
     python herramientas/modelo_3d/generar_modelo.py herramientas/modelo_3d/modulo_aerosense.glb \
-        --header receptor/include/modelo_glb.h
+        --header estacion_terrestre/include/modelo_glb.h
 
 Requiere numpy y Pillow.
 
